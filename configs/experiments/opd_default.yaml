@@ -1,0 +1,94 @@
+schema_version: 1
+
+experiment:
+  name: opd_default
+  project_name: OnPolicyDistillation
+  description: Reproduction of the default DeepSeek-1.5B / JustRL-1.5B OPD run.
+  tags: [opd, reproduction, dapo-math-17k]
+  seed: 42
+
+storage:
+  experiments_root: "${OPD_STORAGE_ROOT}/experiments"
+
+data:
+  train_files:
+    - "${OPD_ROOT}/datasets/dapo-math-17k.parquet"
+  val_files:
+    - "${OPD_ROOT}/datasets/test_data/AIME25/test.parquet"
+    - "${OPD_ROOT}/datasets/test_data/AMC23/test.parquet"
+    - "${OPD_ROOT}/datasets/test_data/AIME24/test.parquet"
+  dataset_name: DAPO-Math-17k
+  shuffle: false
+  max_prompt_length: 1024
+  max_response_length: 7168
+  max_val_response_length: 7168
+  filter_overlong_prompts: true
+  truncation: error
+
+models:
+  actor_path: "${OPD_MODEL_DIR}/DeepSeek-R1-Distill-Qwen-1.5B"
+  teacher_path: "${OPD_MODEL_DIR}/JustRL-DeepSeek-1.5B"
+  dtype: fp32
+
+distillation:
+  advantage_estimator: token_reward_direct
+  grpo_outcome_weight: 1.0
+  log_prob_top_k: 16
+  top_k_strategy: only_stu
+  reward_weight_mode: student_p
+  teacher_temperature: 1.0
+  enable_format_reward: false
+  use_kl: false
+  kl_loss_coef: 0.005
+  kl_loss_type: low_var_kl
+
+optimization:
+  learning_rate: 1.0e-6
+  lr_scheduler: constant
+  mini_batch_size: 64
+  micro_batch_size_per_gpu: 1
+  loss_agg_mode: token-mean
+  gradient_checkpointing: true
+  activation_offload: true
+  param_offload: false
+  optimizer_offload: false
+
+rollout:
+  backend: vllm
+  n: 4
+  temperature: 1.0
+  repetition_penalty: 1.0
+  tensor_model_parallel_size: 1
+  sequence_parallel_size: 1
+  gpu_memory_utilization: 0.8
+  validation_n: 16
+  validation_temperature: 0.7
+  validation_top_p: 0.95
+
+reward_model:
+  micro_batch_size_per_gpu: 24
+
+trainer:
+  n_gpus_per_node: 8
+  nnodes: 1
+  total_epochs: 1
+  total_training_steps: null
+  save_freq: 20
+  test_freq: -1
+  val_before_train: false
+  log_val_generations: 2
+  max_actor_ckpt_to_keep: 3
+  resume_mode: disable
+  is_plot: true
+
+logging:
+  backends: [console, swanlab]
+  swanlab_mode: offline
+  dump_rollouts: false
+
+runtime:
+  cuda_launch_blocking: true
+  nccl_timeout: 7200
+  nccl_debug: WARN
+  torch_distributed_debug: INFO
+

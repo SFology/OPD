@@ -1,0 +1,11 @@
+# Runtime links and outputs are machine-local and live on attached storage.
+/checkpoint
+/experiments
+/logs
+/model
+/validation_log
+
+# Python/runtime artifacts.
+/.hydra
+__pycache__/
+*.py[cod]

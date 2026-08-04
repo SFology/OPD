@@ -1,0 +1,31 @@
+extends: opd_default.yaml
+
+experiment:
+  name: opd_smoke
+  description: Two-step OPD integration test using a deterministic 64-example subset.
+  tags: [opd, smoke]
+
+data:
+  train_files:
+    - "${OPD_DATA_DIR}/smoke/dapo-math-17k-64.parquet"
+  dataset_name: DAPO-Math-17k-smoke64
+  max_response_length: 1024
+  max_val_response_length: 1024
+
+optimization:
+  mini_batch_size: 8
+
+rollout:
+  n: 2
+  gpu_memory_utilization: 0.7
+
+trainer:
+  total_training_steps: 2
+  save_freq: 1
+  max_actor_ckpt_to_keep: 2
+  is_plot: false
+
+logging:
+  swanlab_mode: offline
+  dump_rollouts: true
+

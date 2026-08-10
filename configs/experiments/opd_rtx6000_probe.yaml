@@ -1,0 +1,11 @@
+extends: opd_rtx6000_baseline.yaml
+
+experiment:
+  name: opd_rtx6000_probe
+  description: One-step full-shape resource probe for the 8x RTX 6000 OPD baseline.
+  tags: [opd, reproduction, probe, rtx6000-ada, 8gpu]
+
+trainer:
+  total_training_steps: 1
+  save_freq: 1
+  max_actor_ckpt_to_keep: 1

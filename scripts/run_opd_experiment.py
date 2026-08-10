@@ -178,7 +178,9 @@ def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[s
         data["max_prompt_length"] + data["max_response_length"],
         data["max_prompt_length"] + data["max_val_response_length"],
     )
-    max_tokens_per_gpu = max(data["max_prompt_length"] + data["max_response_length"], 32768)
+    max_tokens_per_gpu = optim.get("max_tokens_per_gpu") or max(
+        data["max_prompt_length"] + data["max_response_length"], 32768
+    )
     global_batch = optim["mini_batch_size"] * rollout["sequence_parallel_size"]
     rollout_dir = str(run_dir / "rollouts") if logging["dump_rollouts"] else None
 
@@ -239,7 +241,7 @@ def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[s
         ("reward_model.model.path", models["teacher_path"], False),
         ("reward_model.model.input_tokenizer", None, False),
         ("reward_model.model.use_remove_padding", True, False),
-        ("reward_model.model.fsdp_config.param_offload", False, False),
+        ("reward_model.model.fsdp_config.param_offload", reward["param_offload"], False),
         ("reward_model.model.dtype", models["dtype"], True),
         ("reward_model.micro_batch_size_per_gpu", reward["micro_batch_size_per_gpu"], False),
         ("custom_reward_function.path", str(REPO_ROOT / "verl/verl/utils/reward_score/ttrl_math/__init__.py"), False),
@@ -283,7 +285,7 @@ def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[s
 
 def managed_environment(config: dict[str, Any], run_dir: Path) -> dict[str, str]:
     runtime = config["runtime"]
-    return {
+    result = {
         "CUDA_LAUNCH_BLOCKING": "1" if runtime["cuda_launch_blocking"] else "0",
         "HYDRA_FULL_ERROR": "1",
         "NCCL_DEBUG": str(runtime["nccl_debug"]),
@@ -296,6 +298,42 @@ def managed_environment(config: dict[str, Any], run_dir: Path) -> dict[str, str]
         "TORCH_DISTRIBUTED_DEBUG": str(runtime["torch_distributed_debug"]),
         "TORCH_NCCL_BLOCKING_WAIT": "1",
     }
+    if runtime.get("cuda_visible_devices") is not None:
+        result["CUDA_VISIBLE_DEVICES"] = str(runtime["cuda_visible_devices"])
+    for compiler_var in ("CC", "CXX"):
+        if os.environ.get(compiler_var):
+            result[compiler_var] = os.environ[compiler_var]
+    return result
+
+
+def gpu_preflight(config: dict[str, Any]) -> None:
+    runtime = config["runtime"]
+    threshold = runtime.get("min_free_gpu_memory_mb")
+    visible = runtime.get("cuda_visible_devices")
+    if threshold is None or visible is None:
+        return
+    requested = [int(item.strip()) for item in str(visible).split(",") if item.strip()]
+    output = run_capture(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,memory.free,memory.total,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ]
+    )
+    records: dict[int, tuple[int, int, int]] = {}
+    for line in output.splitlines():
+        fields = [int(field.strip()) for field in line.split(",")]
+        if len(fields) == 4:
+            records[fields[0]] = (fields[1], fields[2], fields[3])
+    for index in requested:
+        if index not in records:
+            raise RuntimeError(f"GPU {index} is not visible to nvidia-smi")
+        free_mb, total_mb, utilization = records[index]
+        print(f"GPU_PREFLIGHT index={index} free={free_mb}MiB total={total_mb}MiB utilization={utilization}%")
+        if free_mb < int(threshold):
+            raise RuntimeError(
+                f"GPU {index} has {free_mb} MiB free, below the configured {threshold} MiB safety threshold"
+            )
 
 
 def render_command_script(command: list[str], config: dict[str, Any], run_dir: Path) -> str:
@@ -450,6 +488,8 @@ def main() -> int:
     print(f"COMMAND={shlex.join(command)}")
     if args.dry_run:
         return 0
+
+    gpu_preflight(config)
 
     if not resume:
         run_dir.mkdir(parents=True)

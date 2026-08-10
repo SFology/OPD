@@ -1,0 +1,41 @@
+extends: opd_smoke.yaml
+
+experiment:
+  name: opd_constrained_smoke
+  description: One-step, single-GPU OPD pipeline test on a partially occupied GPU.
+  tags: [opd, smoke, constrained, single-gpu]
+
+data:
+  max_response_length: 512
+  max_val_response_length: 512
+
+models:
+  dtype: bfloat16
+
+optimization:
+  mini_batch_size: 1
+  micro_batch_size_per_gpu: 1
+  max_tokens_per_gpu: 4096
+  param_offload: true
+  optimizer_offload: true
+
+rollout:
+  n: 1
+  gpu_memory_utilization: 0.12
+  validation_n: 1
+
+reward_model:
+  micro_batch_size_per_gpu: 1
+  param_offload: true
+
+trainer:
+  n_gpus_per_node: 1
+  total_training_steps: 1
+  save_freq: 1
+  log_val_generations: 0
+  max_actor_ckpt_to_keep: 1
+
+runtime:
+  cuda_visible_devices: "1"
+  min_free_gpu_memory_mb: 22000
+  cuda_launch_blocking: false

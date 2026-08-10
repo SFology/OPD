@@ -58,6 +58,27 @@ Launch the smoke run after all eight GPUs are available:
 python scripts/run_opd_experiment.py configs/experiments/opd_smoke.yaml
 ```
 
+On a partially occupied server, the explicitly non-reproduction single-GPU
+pipeline check can be launched with:
+
+```bash
+python scripts/run_opd_experiment.py configs/experiments/opd_constrained_smoke.yaml
+```
+
+Before committing to the full 8x RTX 6000 Ada baseline, run one full-shape
+optimizer step to verify peak memory with the original batch, rollout count,
+and sequence lengths:
+
+```bash
+python scripts/run_opd_experiment.py configs/experiments/opd_rtx6000_probe.yaml
+```
+
+After the probe completes, launch the comparable one-epoch baseline with:
+
+```bash
+python scripts/run_opd_experiment.py configs/experiments/opd_rtx6000_baseline.yaml
+```
+
 Launch the full default reproduction:
 
 ```bash

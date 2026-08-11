@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CONFIG="$REPO_ROOT/configs/trustworthy_opd/pilot.yaml"
 RUN_DIR="${TRUST_OPD_RUN:-}"
 FROM_STAGE=""
+STOP_AFTER="analysis"
 MIN_FREE_MB=30000
 MAX_UTIL=15
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -19,6 +20,7 @@ Options:
   --run-dir PATH      Resume an existing run directory
   --from-stage NAME   Start at collect, check, student-features, teacher-features,
                       stability, student-validation, teacher-validation, or analysis
+  --stop-after NAME   Stop cleanly after the named stage (default: analysis)
   --min-free-mb N     Minimum free GPU memory in MiB (default: 30000)
   --max-util N        Maximum GPU utilization percent (default: 15)
   -h, --help          Show this help
@@ -30,6 +32,7 @@ while (($#)); do
         --config) CONFIG="$2"; shift 2 ;;
         --run-dir) RUN_DIR="$2"; shift 2 ;;
         --from-stage) FROM_STAGE="$2"; shift 2 ;;
+        --stop-after) STOP_AFTER="$2"; shift 2 ;;
         --min-free-mb) MIN_FREE_MB="$2"; shift 2 ;;
         --max-util) MAX_UTIL="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -162,6 +165,22 @@ else
     START_STAGE=collect
 fi
 START_NUMBER="$(stage_number "$START_STAGE")"
+STOP_NUMBER="$(stage_number "$STOP_AFTER")"
+if ((START_NUMBER > STOP_NUMBER)); then
+    echo "Start stage occurs after stop stage" >&2
+    exit 2
+fi
+
+finish_if_requested() {
+    local completed_number
+    completed_number="$(stage_number "$1")"
+    if ((completed_number == STOP_NUMBER)); then
+        echo
+        echo "Requested stages complete"
+        echo "TRUST_OPD_RUN=$RUN_DIR"
+        exit 0
+    fi
+}
 
 if ((START_NUMBER <= 0)); then
     gpu_id="$(select_gpu)"
@@ -183,6 +202,7 @@ if ((START_NUMBER <= 0)); then
     }
     export TRUST_OPD_RUN="$RUN_DIR"
     cp "$launch_log" "$RUN_DIR/logs/01_collect_states.log"
+    finish_if_requested collect
 fi
 
 export TRUST_OPD_RUN="$RUN_DIR"
@@ -190,30 +210,37 @@ export TRUST_OPD_RUN="$RUN_DIR"
 if ((START_NUMBER <= 1)); then
     run_cpu_stage 01b_check_collection "$PYTHON_BIN" -u \
         "$SCRIPT_DIR/check_collection.py" --run-dir "$RUN_DIR"
+    finish_if_requested check
 fi
 if ((START_NUMBER <= 2)); then
     run_gpu_stage 02_extract_student "$PYTHON_BIN" -u \
         "$SCRIPT_DIR/extract_features.py" --run-dir "$RUN_DIR" --role student
+    finish_if_requested student-features
 fi
 if ((START_NUMBER <= 3)); then
     run_gpu_stage 03_extract_teacher "$PYTHON_BIN" -u \
         "$SCRIPT_DIR/extract_features.py" --run-dir "$RUN_DIR" --role teacher
+    finish_if_requested teacher-features
 fi
 if ((START_NUMBER <= 4)); then
     run_cpu_stage 04_compute_stability "$PYTHON_BIN" -u \
         "$SCRIPT_DIR/compute_stability.py" --run-dir "$RUN_DIR"
+    finish_if_requested stability
 fi
 if ((START_NUMBER <= 5)); then
     run_gpu_stage 05_validate_student "$PYTHON_BIN" -u \
         "$SCRIPT_DIR/validate_reliability.py" --run-dir "$RUN_DIR" --role student
+    finish_if_requested student-validation
 fi
 if ((START_NUMBER <= 6)); then
     run_gpu_stage 06_validate_teacher "$PYTHON_BIN" -u \
         "$SCRIPT_DIR/validate_reliability.py" --run-dir "$RUN_DIR" --role teacher
+    finish_if_requested teacher-validation
 fi
 if ((START_NUMBER <= 7)); then
     run_cpu_stage 07_analyze_results "$PYTHON_BIN" -u \
         "$SCRIPT_DIR/analyze_results.py" --run-dir "$RUN_DIR"
+    finish_if_requested analysis
 fi
 
 echo

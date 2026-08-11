@@ -139,6 +139,32 @@ def summarize_if_complete(run_dir: Path, config: dict, selected: list[dict]) -> 
         else:
             pairwise = float("nan")
             normalized_entropy = 0.0 if len(valid_answers) == 1 else float("nan")
+        invalid_count = metric_count - len(valid_answers)
+        majority_adjusted = (
+            float(cluster_counts.max() / metric_count) if len(cluster_counts) else 0.0
+        )
+        pairwise_adjusted = (
+            float(
+                np.sum(cluster_counts * (cluster_counts - 1))
+                / (metric_count * (metric_count - 1))
+            )
+            if metric_count >= 2
+            else float("nan")
+        )
+        conservative_counts = np.concatenate(
+            [cluster_counts, np.ones(invalid_count, dtype=np.float64)]
+        )
+        conservative_probabilities = conservative_counts / metric_count
+        conservative_entropy = float(
+            -np.sum(
+                conservative_probabilities * np.log(conservative_probabilities),
+                dtype=np.float64,
+            )
+        )
+        conservative_normalized_entropy = float(
+            conservative_entropy / np.log(metric_count) if metric_count > 1 else 0.0
+        )
+        token_limit = int(config["validation"]["max_new_tokens"])
         labels.append(
             {
                 "state_id": state["state_id"],
@@ -155,7 +181,51 @@ def summarize_if_complete(run_dir: Path, config: dict, selected: list[dict]) -> 
                 "teacher_self_consistency_pairwise": pairwise,
                 "teacher_semantic_entropy": semantic_entropy,
                 "teacher_normalized_semantic_entropy": normalized_entropy,
+                "teacher_self_consistency_majority_coverage_adjusted": majority_adjusted,
+                "teacher_self_consistency_pairwise_coverage_adjusted": pairwise_adjusted,
+                "teacher_semantic_entropy_conservative": conservative_entropy,
+                "teacher_normalized_semantic_entropy_conservative": conservative_normalized_entropy,
                 "teacher_valid_answer_rate": len(valid_answers) / metric_count,
+                "teacher_metric_truncated_rate": float(
+                    np.mean(
+                        [
+                            len(row["generated_token_ids"]) >= token_limit
+                            for row in teacher_metric_rows
+                        ]
+                    )
+                ),
+                "teacher_label_truncated_rate": float(
+                    np.mean(
+                        [
+                            len(row["generated_token_ids"]) >= token_limit
+                            for row in teacher_label_rows
+                        ]
+                    )
+                ),
+                "student_label_truncated_rate": float(
+                    np.mean(
+                        [
+                            len(row["generated_token_ids"]) >= token_limit
+                            for row in student_label_rows
+                        ]
+                    )
+                ),
+                "teacher_label_parseable_rate": float(
+                    np.mean(
+                        [
+                            row.get("predicted_answer") not in (None, "", "[INVALID]")
+                            for row in teacher_label_rows
+                        ]
+                    )
+                ),
+                "student_label_parseable_rate": float(
+                    np.mean(
+                        [
+                            row.get("predicted_answer") not in (None, "", "[INVALID]")
+                            for row in student_label_rows
+                        ]
+                    )
+                ),
                 "teacher_metric_continuations": metric_count,
                 "task_label_continuations_per_role": required - metric_count,
             }

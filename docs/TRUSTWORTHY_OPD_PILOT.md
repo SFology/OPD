@@ -2,9 +2,9 @@
 
 This pilot tests whether local teacher instability on student-generated states
 predicts real-task teacher reliability. It performs no parameter updates.
-The response budget matches the original OPD setting (7168 tokens); reducing it
-to a 512-token smoke-test budget truncates DeepSeek-R1-style reasoning before a
-parseable final answer and makes reliability labels degenerate.
+The reliability pilot uses a 16384-token response budget. The original
+7168-token training budget truncated 75.8% of sampled student trajectories in
+the first pilot, while a 512-token smoke budget truncated every trajectory.
 
 ## Hypotheses
 
@@ -70,6 +70,19 @@ quality checks, and stop-on-error behavior, use the local pipeline wrapper:
 ```bash
 bash scripts/trustworthy_opd/run_pipeline.sh
 ```
+
+Before a full run, test the response budget on eight prompts and stop after the
+quality gate:
+
+```bash
+bash scripts/trustworthy_opd/run_pipeline.sh \
+  --config configs/trustworthy_opd/truncation_preflight.yaml \
+  --stop-after check
+```
+
+The default gate requires at least 75% parseable trajectories and no more than
+25% token-limit truncation. A failed gate prevents all downstream feature and
+continuation work.
 
 Resume from the status recorded in an existing run with:
 
@@ -216,7 +229,8 @@ on independently estimated task success:
 - teacher-student full-vocabulary KL, reverse KL, and Jensen-Shannon divergence;
 - teacher-student top-1 agreement and top-k overlap;
 - teacher self-consistency (majority share and pairwise agreement);
-- teacher semantic entropy (raw and normalized);
+- teacher semantic entropy (raw, normalized, and conservative variants that
+  count unparseable generations as distinct uncertain outcomes);
 - teacher prefix PPL and actual student-action PPL;
 - sampled-action confidence and the teacher-student action gap.
 

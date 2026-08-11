@@ -73,6 +73,10 @@ def main() -> int:
         ("teacher_self_consistency_pairwise", -1.0),
         ("teacher_semantic_entropy", 1.0),
         ("teacher_normalized_semantic_entropy", 1.0),
+        ("teacher_self_consistency_majority_coverage_adjusted", -1.0),
+        ("teacher_self_consistency_pairwise_coverage_adjusted", -1.0),
+        ("teacher_semantic_entropy_conservative", 1.0),
+        ("teacher_normalized_semantic_entropy_conservative", 1.0),
         ("teacher_valid_answer_rate", -1.0),
     ]
     relative_metrics = [

@@ -11,14 +11,25 @@ def parse_args() -> argparse.Namespace:
         description="Reject trajectory collections dominated by token-limit truncation."
     )
     parser.add_argument("--run-dir", required=True, type=Path)
-    parser.add_argument("--max-truncated-fraction", type=float, default=0.9)
-    parser.add_argument("--min-parseable-fraction", type=float, default=0.05)
+    parser.add_argument("--max-truncated-fraction", type=float)
+    parser.add_argument("--min-parseable-fraction", type=float)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     run_dir, config = load_run(args.run_dir)
+    quality = config.get("collection_quality", {})
+    max_truncated_fraction = (
+        args.max_truncated_fraction
+        if args.max_truncated_fraction is not None
+        else float(quality.get("max_truncated_fraction", 0.25))
+    )
+    min_parseable_fraction = (
+        args.min_parseable_fraction
+        if args.min_parseable_fraction is not None
+        else float(quality.get("min_parseable_fraction", 0.75))
+    )
     rows = read_jsonl(run_dir / "artifacts" / "trajectories.jsonl")
     if not rows:
         raise RuntimeError("No collected trajectories were found")
@@ -39,25 +50,31 @@ def main() -> int:
     print(f"truncated={truncated} ({truncated_fraction:.1%})")
     print(f"parseable={parseable} ({parseable_fraction:.1%})")
     print(f"correct={correct} ({correct_fraction:.1%})")
+    print(f"max_truncated_fraction={max_truncated_fraction:.1%}")
+    print(f"min_parseable_fraction={min_parseable_fraction:.1%}")
 
-    if truncated_fraction > args.max_truncated_fraction:
+    if truncated_fraction > max_truncated_fraction:
         update_status(
             run_dir,
             "collection_rejected",
             rejection_reason="excessive_truncation",
             truncated_fraction=truncated_fraction,
             parseable_fraction=parseable_fraction,
+            max_truncated_fraction=max_truncated_fraction,
+            min_parseable_fraction=min_parseable_fraction,
         )
         raise RuntimeError(
             "Collection rejected: too many trajectories reached the token limit"
         )
-    if parseable_fraction < args.min_parseable_fraction:
+    if parseable_fraction < min_parseable_fraction:
         update_status(
             run_dir,
             "collection_rejected",
             rejection_reason="insufficient_parseable_answers",
             truncated_fraction=truncated_fraction,
             parseable_fraction=parseable_fraction,
+            max_truncated_fraction=max_truncated_fraction,
+            min_parseable_fraction=min_parseable_fraction,
         )
         raise RuntimeError(
             "Collection rejected: too few trajectories contain parseable final answers"
@@ -68,6 +85,8 @@ def main() -> int:
         truncated_fraction=truncated_fraction,
         parseable_fraction=parseable_fraction,
         trajectory_correct_fraction=correct_fraction,
+        max_truncated_fraction=max_truncated_fraction,
+        min_parseable_fraction=min_parseable_fraction,
     )
     return 0
 

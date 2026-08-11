@@ -1,18 +1,16 @@
 schema_version: 1
 
 experiment:
-  name: trustworthy_opd_pilot
+  name: trustworthy_opd_truncation_preflight
   seed: 42
   output_root: "${OPD_STORAGE_ROOT}/trustworthy_opd"
 
 data:
   parquet: "${OPD_ROOT}/datasets/dapo-math-17k.parquet"
-  num_prompts: 32
+  num_prompts: 8
   prompt_offset: 0
   rollouts_per_prompt: 4
   max_prompt_tokens: 1024
-  # Reliability evaluation needs more headroom than the original 7168-token
-  # training budget, which truncated most sampled reasoning trajectories.
   max_new_tokens: 16384
   temperature: 1.0
   top_p: 1.0
@@ -30,9 +28,6 @@ models:
   store_full_log_probs: true
   prefix_ppl_roles: [teacher]
 
-# Each representation is evaluated independently. This intentionally includes
-# alternatives to a middle-layer last-token vector so that conclusions do not
-# depend on a single hidden-state design choice.
 representations:
   normalize: true
   definitions:
@@ -62,8 +57,6 @@ validation:
   primary_neighborhood: dual_knn
   primary_metric: relative_max
   num_anchor_states: 24
-  # The first half estimates self-consistency/semantic entropy; the second
-  # independent half estimates real-task success labels.
   continuations_per_state: 8
   metric_continuations_per_state: 4
   max_new_tokens: 16384

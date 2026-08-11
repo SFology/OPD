@@ -126,9 +126,11 @@ def main() -> int:
                 continue
 
             prompt_ids = prompt_ids.to(device)
+            attention_mask = torch.ones_like(prompt_ids)
             with torch.inference_mode():
                 sequences = model.generate(
                     input_ids=prompt_ids,
+                    attention_mask=attention_mask,
                     do_sample=True,
                     temperature=float(config["data"]["temperature"]),
                     top_p=float(config["data"]["top_p"]),

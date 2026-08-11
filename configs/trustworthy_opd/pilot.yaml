@@ -11,7 +11,9 @@ data:
   prompt_offset: 0
   rollouts_per_prompt: 4
   max_prompt_tokens: 1024
-  max_new_tokens: 512
+  # Match the original OPD response budget. A 512-token smoke budget truncates
+  # every DeepSeek-R1-style reasoning trajectory before a final answer.
+  max_new_tokens: 7168
   temperature: 1.0
   top_p: 1.0
   state_fractions: [0.2, 0.4, 0.6, 0.8]
@@ -64,7 +66,7 @@ validation:
   # independent half estimates real-task success labels.
   continuations_per_state: 8
   metric_continuations_per_state: 4
-  max_new_tokens: 512
+  max_new_tokens: 7168
   temperature: 0.7
   top_p: 0.95
 

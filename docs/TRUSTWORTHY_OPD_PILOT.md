@@ -2,6 +2,9 @@
 
 This pilot tests whether local teacher instability on student-generated states
 predicts real-task teacher reliability. It performs no parameter updates.
+The response budget matches the original OPD setting (7168 tokens); reducing it
+to a 512-token smoke-test budget truncates DeepSeek-R1-style reasoning before a
+parseable final answer and makes reliability labels degenerate.
 
 ## Hypotheses
 

@@ -214,9 +214,11 @@ def main() -> int:
                 dtype=torch.long,
                 device=device,
             )
+            attention_mask = torch.ones_like(prefix)
             with torch.inference_mode():
                 sequences = model.generate(
                     input_ids=prefix,
+                    attention_mask=attention_mask,
                     do_sample=float(validation["temperature"]) > 0,
                     temperature=float(validation["temperature"]),
                     top_p=float(validation["top_p"]),

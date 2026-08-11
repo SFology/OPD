@@ -1,5 +1,8 @@
 # OPD experiment management
 
+The inference-only trustworthy-OPD reliability pilot is documented separately
+in [`TRUSTWORTHY_OPD_PILOT.md`](TRUSTWORTHY_OPD_PILOT.md).
+
 Managed runs use one immutable `RUN_ID` for configuration, logs, checkpoints,
 rollouts, validation output, evaluation output, and SwanLab records. Runtime
 artifacts live under `${OPD_STORAGE_ROOT}/experiments`; only launch code and

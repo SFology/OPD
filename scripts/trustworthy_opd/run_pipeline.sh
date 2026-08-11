@@ -127,7 +127,7 @@ infer_resume_stage() {
         analyzed) echo done ;;
         failed)
             case "$(awk '/^stage:/ {print $2; exit}' "$RUN_DIR/status.yaml")" in
-                collect_states) echo collect ;;
+                collect|collect_states) echo collect ;;
                 extract_student) echo student-features ;;
                 extract_teacher) echo teacher-features ;;
                 validate_student) echo student-validation ;;

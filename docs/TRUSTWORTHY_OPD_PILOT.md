@@ -84,6 +84,14 @@ The default gate requires at least 75% parseable trajectories and no more than
 25% token-limit truncation. A failed gate prevents all downstream feature and
 continuation work.
 
+The harder confirmation slice uses dataset rows 8-15:
+
+```bash
+bash scripts/trustworthy_opd/run_pipeline.sh \
+  --config configs/trustworthy_opd/truncation_preflight_offset8.yaml \
+  --stop-after check
+```
+
 Resume from the status recorded in an existing run with:
 
 ```bash

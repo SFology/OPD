@@ -134,6 +134,10 @@ def update_status(run_dir: Path, status: str, **extra: Any) -> None:
         if current_path.exists()
         else {}
     )
+    if status != "failed":
+        current.pop("error", None)
+        current.pop("stage", None)
+        current.pop("rejection_reason", None)
     current.update({"status": status, "updated_at_utc": utc_now(), **extra})
     save_yaml(current_path, current)
 

@@ -17,6 +17,7 @@ from common import (
     save_yaml,
     set_seed,
     tokenizer_fingerprint,
+    trim_generated_tokens,
     update_status,
     write_jsonl,
 )
@@ -143,7 +144,10 @@ def main() -> int:
             prompt_list = prompt_ids[0].detach().cpu().tolist()
             new_rows = []
             for sequence, rollout_index in zip(sequences, missing):
-                generated_ids = sequence[prompt_ids.shape[-1] :].detach().cpu().tolist()
+                generated_ids = trim_generated_tokens(
+                    sequence[prompt_ids.shape[-1] :].detach().cpu().tolist(),
+                    tokenizer.eos_token_id,
+                )
                 text = tokenizer.decode(generated_ids, skip_special_tokens=True)
                 ground_truth = str(item["reward_model"]["ground_truth"])
                 graded = grade(text, ground_truth)
@@ -158,6 +162,7 @@ def main() -> int:
                         "generated_text": text,
                         "ground_truth": ground_truth,
                         "trajectory_correct": bool(graded["acc"]),
+                        "trajectory_predicted_answer": graded.get("pred"),
                     }
                 )
             append_jsonl(trajectories_path, new_rows)

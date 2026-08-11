@@ -14,6 +14,7 @@ from common import (
     load_run,
     read_jsonl,
     set_seed,
+    trim_generated_tokens,
     update_status,
     write_jsonl,
 )
@@ -231,9 +232,14 @@ def main() -> int:
             rows = []
             for sequence, continuation_index in zip(sequences, missing):
                 sequence_ids = sequence.detach().cpu().tolist()
-                generated_ids = sequence_ids[prefix.shape[-1] :]
+                generated_ids = trim_generated_tokens(
+                    sequence_ids[prefix.shape[-1] :], tokenizer.eos_token_id
+                )
                 text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-                full_text = tokenizer.decode(sequence_ids, skip_special_tokens=True)
+                full_text = tokenizer.decode(
+                    sequence_ids[: prefix.shape[-1]] + generated_ids,
+                    skip_special_tokens=True,
+                )
                 result = grade(full_text, str(state["ground_truth"]))
                 rows.append(
                     {

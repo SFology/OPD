@@ -86,6 +86,22 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def trim_generated_tokens(
+    token_ids: list[int], eos_token_id: int | list[int] | None
+) -> list[int]:
+    if eos_token_id is None:
+        return token_ids
+    eos_ids = (
+        {int(item) for item in eos_token_id}
+        if isinstance(eos_token_id, list)
+        else {int(eos_token_id)}
+    )
+    for index, token_id in enumerate(token_ids):
+        if int(token_id) in eos_ids:
+            return token_ids[:index]
+    return token_ids
+
+
 def create_run_dir(config: dict[str, Any], config_path: Path) -> Path:
     root = Path(config["experiment"]["output_root"])
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

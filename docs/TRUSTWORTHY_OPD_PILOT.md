@@ -64,6 +64,23 @@ All GPU stages are deliberately separate and resumable. Review each command
 before running it. The example below maps physical GPU 2 to `cuda:0` inside the
 process.
 
+For a complete run with automatic GPU selection, per-stage logs, collection
+quality checks, and stop-on-error behavior, use the local pipeline wrapper:
+
+```bash
+bash scripts/trustworthy_opd/run_pipeline.sh
+```
+
+Resume from the status recorded in an existing run with:
+
+```bash
+bash scripts/trustworthy_opd/run_pipeline.sh --run-dir "$TRUST_OPD_RUN"
+```
+
+Use `--from-stage NAME` only when deliberately overriding automatic resume.
+The wrapper reevaluates GPU availability before every GPU stage; the commands
+below remain useful when running or debugging stages individually.
+
 Set the common environment first:
 
 ```bash

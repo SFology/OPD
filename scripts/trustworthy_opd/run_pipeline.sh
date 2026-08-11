@@ -104,18 +104,37 @@ infer_resume_stage() {
     local status
     status="$(awk '/^status:/ {print $2; exit}' "$RUN_DIR/status.yaml")"
     case "$status" in
+        collecting) echo collect ;;
         collected) echo check ;;
         collection_rejected)
             echo "Rejected collections must be restarted as a new run" >&2
             exit 2
             ;;
         collection_checked) echo student-features ;;
+        extracting_student) echo student-features ;;
         extracted_student) echo teacher-features ;;
+        extracting_teacher) echo teacher-features ;;
         extracted_teacher) echo stability ;;
+        computing_stability) echo stability ;;
         stability_computed) echo student-validation ;;
+        validating_student) echo student-validation ;;
         validated_student_partial) echo teacher-validation ;;
+        validating_teacher) echo teacher-validation ;;
         validated) echo analysis ;;
         analyzed) echo done ;;
+        failed)
+            case "$(awk '/^stage:/ {print $2; exit}' "$RUN_DIR/status.yaml")" in
+                collect_states) echo collect ;;
+                extract_student) echo student-features ;;
+                extract_teacher) echo teacher-features ;;
+                validate_student) echo student-validation ;;
+                validate_teacher) echo teacher-validation ;;
+                *)
+                    echo "Cannot infer failed stage; use --from-stage" >&2
+                    exit 2
+                    ;;
+            esac
+            ;;
         *)
             echo "Cannot infer resume stage from status '$status'; use --from-stage" >&2
             exit 2

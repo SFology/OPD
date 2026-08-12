@@ -92,6 +92,15 @@ bash scripts/trustworthy_opd/run_pipeline.sh \
   --stop-after check
 ```
 
+If the 16k harder slice fails, test a 24576-token budget on the same rows with
+the stricter goal of at most 15% truncation and at least 80% parseability:
+
+```bash
+bash scripts/trustworthy_opd/run_pipeline.sh \
+  --config configs/trustworthy_opd/truncation_preflight_24k_offset8.yaml \
+  --stop-after check
+```
+
 Resume from the status recorded in an existing run with:
 
 ```bash

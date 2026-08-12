@@ -9,6 +9,9 @@ FROM_STAGE=""
 STOP_AFTER="analysis"
 MIN_FREE_MB=30000
 MAX_UTIL=15
+GPU_WAIT_SECONDS=0
+GPU_POLL_SECONDS=60
+GPU_STABILITY_SECONDS=5
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 usage() {
@@ -23,6 +26,12 @@ Options:
   --stop-after NAME   Stop cleanly after the named stage (default: analysis)
   --min-free-mb N     Minimum free GPU memory in MiB (default: 30000)
   --max-util N        Maximum GPU utilization percent (default: 15)
+  --gpu-wait-seconds N
+                      Wait up to N seconds for every GPU stage (default: 0)
+  --gpu-poll-seconds N
+                      Seconds between availability checks (default: 60)
+  --gpu-stability-seconds N
+                      Recheck a candidate after N seconds (default: 5)
   -h, --help          Show this help
 EOF
 }
@@ -35,6 +44,9 @@ while (($#)); do
         --stop-after) STOP_AFTER="$2"; shift 2 ;;
         --min-free-mb) MIN_FREE_MB="$2"; shift 2 ;;
         --max-util) MAX_UTIL="$2"; shift 2 ;;
+        --gpu-wait-seconds) GPU_WAIT_SECONDS="$2"; shift 2 ;;
+        --gpu-poll-seconds) GPU_POLL_SECONDS="$2"; shift 2 ;;
+        --gpu-stability-seconds) GPU_STABILITY_SECONDS="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -47,28 +59,54 @@ export OPD_MODEL_DIR="${OPD_MODEL_DIR:-$OPD_STORAGE_ROOT/models}"
 mkdir -p "$OPD_STORAGE_ROOT/trustworthy_opd_launch_logs"
 
 select_gpu() {
-    local selected
-    selected="$({
-        nvidia-smi \
-            --query-gpu=index,memory.free,utilization.gpu \
-            --format=csv,noheader,nounits |
-        awk -F',' -v min_free="$MIN_FREE_MB" -v max_util="$MAX_UTIL" '
-            {
-                for (i=1; i<=3; i++) gsub(/^[ \t]+|[ \t]+$/, "", $i)
-                if ($2 >= min_free && $3 <= max_util) print $1, $2, $3
-            }
-        ' |
-        sort -k2,2nr -k3,3n |
-        awk 'NR == 1 {print $1}'
-    } || true)"
-    if [[ -z "$selected" ]]; then
-        echo "No GPU meets free-memory/utilization thresholds" >&2
-        nvidia-smi \
-            --query-gpu=index,memory.used,memory.free,utilization.gpu \
-            --format=csv >&2
-        return 1
-    fi
-    printf '%s\n' "$selected"
+    local selected confirmed deadline
+    deadline=$((SECONDS + GPU_WAIT_SECONDS))
+    while true; do
+        selected="$({
+            nvidia-smi \
+                --query-gpu=index,memory.free,utilization.gpu \
+                --format=csv,noheader,nounits |
+            awk -F',' -v min_free="$MIN_FREE_MB" -v max_util="$MAX_UTIL" '
+                {
+                    for (i=1; i<=3; i++) gsub(/^[ \t]+|[ \t]+$/, "", $i)
+                    if ($2 >= min_free && $3 <= max_util) print $1, $2, $3
+                }
+            ' |
+            sort -k2,2nr -k3,3n |
+            awk 'NR == 1 {print $1}'
+        } || true)"
+        if [[ -n "$selected" ]]; then
+            sleep "$GPU_STABILITY_SECONDS"
+            confirmed="$(
+                nvidia-smi \
+                    --query-gpu=index,memory.free,utilization.gpu \
+                    --format=csv,noheader,nounits |
+                awk -F',' \
+                    -v wanted="$selected" \
+                    -v min_free="$MIN_FREE_MB" \
+                    -v max_util="$MAX_UTIL" '
+                    {
+                        for (i=1; i<=3; i++) gsub(/^[ \t]+|[ \t]+$/, "", $i)
+                        if ($1 == wanted && $2 >= min_free && $3 <= max_util) print $1
+                    }
+                '
+            )"
+            if [[ "$confirmed" == "$selected" ]]; then
+                printf '%s\n' "$selected"
+                return 0
+            fi
+            echo "GPU $selected did not remain idle during stability check" >&2
+        fi
+        if ((SECONDS >= deadline)); then
+            echo "No GPU meets free-memory/utilization thresholds" >&2
+            nvidia-smi \
+                --query-gpu=index,memory.used,memory.free,utilization.gpu \
+                --format=csv >&2
+            return 1
+        fi
+        echo "Waiting for a GPU with >=${MIN_FREE_MB} MiB free and <=${MAX_UTIL}% utilization" >&2
+        sleep "$GPU_POLL_SECONDS"
+    done
 }
 
 run_gpu_stage() {

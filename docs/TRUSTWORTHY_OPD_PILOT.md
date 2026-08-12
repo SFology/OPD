@@ -92,6 +92,15 @@ bash scripts/trustworthy_opd/run_pipeline.sh \
   --stop-after check
 ```
 
+The medium confirmatory configuration uses 48 prompts, one prompt-balanced
+random anchor per prompt, six independent samples per behavioral metric/label,
+and the validated 24576-token budget:
+
+```bash
+bash scripts/trustworthy_opd/run_pipeline.sh \
+  --config configs/trustworthy_opd/confirmatory_24k_medium.yaml
+```
+
 If the 16k harder slice fails, test a 24576-token budget on the same rows with
 the stricter goal of at most 15% truncation and at least 80% parseability:
 

@@ -42,19 +42,52 @@ def select_anchor_states(run_dir: Path, config: dict, states: list[dict]) -> lis
         & (stability["neighborhood_method"] == validation["primary_neighborhood"])
         & stability["valid_neighborhood"]
     ].drop_duplicates("state_id")
-    metric = validation["primary_metric"]
-    subset = subset[np.isfinite(subset[metric])].sort_values(metric)
     count = min(int(validation["num_anchor_states"]), len(subset))
     if count == 0:
         raise RuntimeError("No valid anchor states are available for task validation")
-    positions = np.linspace(0, len(subset) - 1, num=count, dtype=int)
-    chosen = subset.iloc[positions]
+    strategy = validation.get("selection_strategy", "primary_metric_stratified")
+    metric = validation.get("primary_metric")
+    if strategy == "primary_metric_stratified":
+        if not metric:
+            raise ValueError(
+                "primary_metric is required for metric-stratified selection"
+            )
+        subset = subset[np.isfinite(subset[metric])].sort_values(metric)
+        positions = np.linspace(0, len(subset) - 1, num=count, dtype=int)
+        chosen = subset.iloc[positions]
+    elif strategy == "prompt_balanced_random":
+        rng = np.random.default_rng(int(config["experiment"]["seed"]) + 30000)
+        queues = {
+            prompt_index: rng.permutation(group.index.to_numpy()).tolist()
+            for prompt_index, group in subset.groupby("prompt_index")
+        }
+        prompt_order = rng.permutation(sorted(queues)).tolist()
+        chosen_indices: list[int] = []
+        while len(chosen_indices) < count:
+            added = False
+            for prompt_index in prompt_order:
+                if queues[prompt_index]:
+                    chosen_indices.append(queues[prompt_index].pop())
+                    added = True
+                    if len(chosen_indices) == count:
+                        break
+            if not added:
+                break
+            prompt_order = rng.permutation(prompt_order).tolist()
+        chosen = subset.loc[chosen_indices]
+    else:
+        raise ValueError(f"Unknown validation selection strategy: {strategy}")
     state_by_id = {state["state_id"]: state for state in states}
     rows = []
     for _, item in chosen.iterrows():
         state = dict(state_by_id[item["state_id"]])
-        state["selection_metric"] = metric
-        state["selection_value"] = float(item[metric])
+        state["selection_strategy"] = strategy
+        state["selection_metric"] = (
+            metric if strategy == "primary_metric_stratified" else None
+        )
+        state["selection_value"] = (
+            float(item[metric]) if strategy == "primary_metric_stratified" else None
+        )
         rows.append(state)
     write_jsonl(selected_path, rows)
     return rows

@@ -21,7 +21,6 @@ from typing import Any
 
 import yaml
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -327,6 +326,32 @@ def managed_environment(config: dict[str, Any], run_dir: Path) -> dict[str, str]
     return result
 
 
+def prepare_ray_tmpdir(config: dict[str, Any]) -> Path:
+    """Create Ray's short socket path, optionally backed by large storage."""
+    runtime = config["runtime"]
+    ray_tmpdir = Path(runtime.get("ray_tmpdir", "/tmp/lfk-ray"))
+    backing_value = runtime.get("ray_tmpdir_backing")
+    if backing_value is None:
+        ray_tmpdir.mkdir(parents=True, exist_ok=True)
+        return ray_tmpdir
+
+    backing = Path(backing_value)
+    backing.mkdir(parents=True, exist_ok=True)
+    if ray_tmpdir.is_symlink():
+        if ray_tmpdir.resolve() != backing.resolve():
+            raise RuntimeError(
+                f"runtime.ray_tmpdir points to {ray_tmpdir.resolve()}, expected backing directory {backing.resolve()}"
+            )
+        return ray_tmpdir
+    if ray_tmpdir.exists():
+        raise RuntimeError(
+            f"runtime.ray_tmpdir must be absent or a symlink when ray_tmpdir_backing is set: {ray_tmpdir}"
+        )
+    ray_tmpdir.parent.mkdir(parents=True, exist_ok=True)
+    ray_tmpdir.symlink_to(backing, target_is_directory=True)
+    return ray_tmpdir
+
+
 def gpu_preflight(config: dict[str, Any]) -> None:
     runtime = config["runtime"]
     threshold = runtime.get("min_free_gpu_memory_mb")
@@ -385,7 +410,10 @@ def validate(config: dict[str, Any]) -> None:
     ray_tmpdir = Path(config["runtime"].get("ray_tmpdir", "/tmp/lfk-ray"))
     if not ray_tmpdir.is_absolute():
         raise ValueError("runtime.ray_tmpdir must be an absolute path")
-    socket_probe = ray_tmpdir / "session_2000-01-01_00-00-00_000000_99999999" / "sockets" / "plasma_store"
+    ray_tmpdir_backing = config["runtime"].get("ray_tmpdir_backing")
+    if ray_tmpdir_backing is not None and not Path(ray_tmpdir_backing).is_absolute():
+        raise ValueError("runtime.ray_tmpdir_backing must be an absolute path")
+    socket_probe = ray_tmpdir / "ray" / "session_2000-01-01_00-00-00_000000_99999999" / "sockets" / "plasma_store"
     if len(os.fsencode(socket_probe)) > 107:
         raise ValueError(
             f"runtime.ray_tmpdir is too long for Ray AF_UNIX sockets: {ray_tmpdir}"
@@ -466,7 +494,7 @@ def launch(command: list[str], run_dir: Path, config: dict[str, Any]) -> int:
     env = os.environ.copy()
     env.update(managed_environment(config, run_dir))
     env.pop("RAY_ADDRESS", None)
-    Path(env["RAY_TMPDIR"]).mkdir(parents=True, exist_ok=True)
+    prepare_ray_tmpdir(config)
     (run_dir / "cache" / "outlines").mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "logs" / "train.log"
     update_status(run_dir, "running", started_at_utc=utc_now(), pid=os.getpid())

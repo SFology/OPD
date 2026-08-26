@@ -92,9 +92,11 @@ runtime:
   cuda_visible_devices: null
   min_free_gpu_memory_mb: null
   # Ray appends a long session/socket suffix. Keep this prefix short enough for
-  # Linux's 107-byte AF_UNIX path limit; large experiment artifacts stay under
-  # storage.experiments_root.
-  ray_tmpdir: /tmp/lfk-ray
+  # Linux's 107-byte AF_UNIX path limit. The short path is a symlink to the
+  # large storage mount so Ray object spilling does not use the nearly-full
+  # root filesystem.
+  ray_tmpdir: /tmp/lfk-ray-opd
+  ray_tmpdir_backing: "${OPD_STORAGE_ROOT}/tmp/ray-short"
   cuda_launch_blocking: true
   nccl_timeout: 7200
   nccl_debug: WARN

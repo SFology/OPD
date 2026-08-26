@@ -144,6 +144,11 @@ class RolloutConfig(BaseConfig):
     reward_weight_mode: str = "student_p"  # "student_p", "teacher_p", or "none"
     teacher_temperature: float = 1.0  # Temperature for teacher logits (default 1.0, no scaling)
 
+    # Optional dense-discrete robust OPD diagnostics/reward configuration.
+    # This lives on the rollout config because it is consumed by both the
+    # driver-side trainer and the rollout workers.
+    robust_opd: dict = field(default_factory=dict)
+
     disable_log_stats: bool = True
 
     multi_stage_wake_up: bool = False

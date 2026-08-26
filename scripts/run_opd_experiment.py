@@ -155,13 +155,30 @@ def hvalue(value: Any) -> str:
         return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (list, dict)):
+    if isinstance(value, list):
         return json.dumps(value, separators=(",", ":"))
+    if isinstance(value, dict):
+        # Hydra accepts YAML-style flow mappings, but JSON's quoted mapping
+        # keys fail its override grammar (for example {"enabled":true}).
+        return yaml.safe_dump(
+            value,
+            default_flow_style=True,
+            sort_keys=False,
+            width=1_000_000,
+        ).strip()
     return str(value)
 
 
 def override(key: str, value: Any, add: bool = False) -> str:
     return f"{'+' if add else ''}{key}={hvalue(value)}"
+
+
+def validate_hydra_overrides(command: list[str]) -> None:
+    """Parse every generated override with Hydra before creating a run."""
+
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
+    OverridesParser.create().parse_overrides(overrides=command[3:])
 
 
 def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[str]:
@@ -503,6 +520,7 @@ def main() -> int:
             raise FileExistsError(f"run already exists: {run_dir}")
 
     command = build_command(config, run_dir, resume)
+    validate_hydra_overrides(command)
     print(f"RUN_ID={run_dir.name}")
     print(f"RUN_DIR={run_dir}")
     print(f"COMMAND={shlex.join(command)}")

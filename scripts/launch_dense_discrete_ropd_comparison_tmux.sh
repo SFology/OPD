@@ -82,8 +82,12 @@ fi
 mkdir -p "$(dirname "$ORCH_LOG")"
 exec > >(tee -a "$ORCH_LOG") 2>&1
 
+# Some Conda activation hooks legitimately inspect unset CUDA variables.  The
+# launcher otherwise uses nounset, so suspend it only while activating.
+set +u
 source "$CONDA_SH"
 conda activate opd
+set -u
 cd "$REPO"
 export OPD_ROOT=$REPO
 export OPD_STORAGE_ROOT=$STORAGE_ROOT

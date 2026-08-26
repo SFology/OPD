@@ -273,6 +273,8 @@ def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[s
                 ("actor_rollout_ref.actor.kl_loss_type", distill["kl_loss_type"], False),
             ]
         )
+    if distill.get("robust_opd") is not None:
+        values.append(("actor_rollout_ref.rollout.robust_opd", distill["robust_opd"], True))
     if optim["lr_scheduler"] == "cosine":
         values.extend(
             [
@@ -361,6 +363,14 @@ def validate(config: dict[str, Any]) -> None:
             raise FileNotFoundError(f"model not found or incomplete: {path}")
     if config["trainer"]["n_gpus_per_node"] < 1:
         raise ValueError("trainer.n_gpus_per_node must be positive")
+    robust_opd = config["distillation"].get("robust_opd")
+    if robust_opd and robust_opd.get("enabled", False):
+        if config["distillation"]["log_prob_top_k"] <= 0:
+            raise ValueError("dense discrete ROPD requires distillation.log_prob_top_k > 0")
+        if config["distillation"]["top_k_strategy"] != "only_stu":
+            raise ValueError("dense discrete ROPD requires distillation.top_k_strategy=only_stu")
+        if config["rollout"]["n"] < 2:
+            raise ValueError("dense discrete ROPD requires rollout.n >= 2")
 
 
 def write_yaml(path: Path, value: Any) -> None:
@@ -372,7 +382,17 @@ def write_yaml(path: Path, value: Any) -> None:
 def prepare_run(
     config: dict[str, Any], source_config: Path, run_dir: Path, git: dict[str, Any], command: list[str], resume: bool
 ) -> None:
-    for name in ["checkpoints", "environment", "evaluation", "hydra", "logs", "rollouts", "swanlab", "validation"]:
+    for name in [
+        "checkpoints",
+        "environment",
+        "evaluation",
+        "hydra",
+        "logs",
+        "metrics",
+        "rollouts",
+        "swanlab",
+        "validation",
+    ]:
         (run_dir / name).mkdir(parents=True, exist_ok=True)
     write_yaml(run_dir / "config.yaml", config)
     config_digest = hashlib.sha256((run_dir / "config.yaml").read_bytes()).hexdigest()

@@ -1,0 +1,11 @@
+extends: opd_completion_first_4gpu.yaml
+
+experiment:
+  name: opd_completion_first_4gpu_probe
+  description: One-step full-shape probe for the completion-first 4-GPU OPD reproduction.
+  tags: [opd, reproduction, completion-first, probe, rtx6000-ada, 4gpu]
+
+trainer:
+  total_training_steps: 1
+  save_freq: 1
+  max_actor_ckpt_to_keep: 1

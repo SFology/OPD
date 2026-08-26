@@ -1,0 +1,45 @@
+extends: opd_completion_first_4gpu.yaml
+
+experiment:
+  name: opd_dense_discrete_base
+  description: Controlled OPD/ROPD comparison with dense discrete cross-rollout trajectory neighborhoods.
+  tags: [opd, ropd, dense-discrete, controlled-comparison, rtx6000-ada, 4gpu]
+
+# Both comparison arms compute and persist OPD and ROPD.  Child configs change
+# only apply_to_training, so the baseline has the same measurement overhead.
+distillation:
+  robust_opd:
+    enabled: true
+    apply_to_training: false
+    method: dense_discrete
+    aggregation: hard_min
+
+    # Student and teacher neighborhoods are defined independently using their
+    # own input embedding tables; no shared embedding space is assumed.
+    representation: token_embedding_tail_mean
+    tail_tokens: 16
+    projection_method: count_sketch
+    projection_dim: 32
+    projection_seed: 314159
+    embedding_cache_dir: "${OPD_STORAGE_ROOT}/cache/robust_opd_embeddings"
+
+    # For every anchor token, inspect densely sampled states from the other
+    # rollouts of the same prompt near the same normalized trajectory progress.
+    candidate_stride: 8
+    candidate_offsets: 6
+    progress_window: 0.06
+
+    # A state must be locally close in both model-specific spaces.  The hard
+    # caps prevent rank-nearest but semantically remote states from entering.
+    radius_quantile: 0.25
+    max_teacher_cosine_distance: 0.35
+    max_student_cosine_distance: 0.35
+    neighbor_k: 3
+    minimum_neighbors: 1
+
+    anchor_chunk_size: 256
+    sample_records_per_step: 128
+
+logging:
+  # The ROPD-specific JSONL files are always written under RUN_DIR/metrics.
+  dump_rollouts: false

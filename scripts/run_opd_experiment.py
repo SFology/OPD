@@ -304,6 +304,7 @@ def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[s
 
 def managed_environment(config: dict[str, Any], run_dir: Path) -> dict[str, str]:
     runtime = config["runtime"]
+    ray_tmpdir = Path(runtime.get("ray_tmpdir", "/tmp/lfk-ray"))
     result = {
         "CUDA_LAUNCH_BLOCKING": "1" if runtime["cuda_launch_blocking"] else "0",
         "HYDRA_FULL_ERROR": "1",
@@ -311,6 +312,7 @@ def managed_environment(config: dict[str, Any], run_dir: Path) -> dict[str, str]
         "NCCL_TIMEOUT": str(runtime["nccl_timeout"]),
         "OUTLINES_CACHE_DIR": str(run_dir / "cache" / "outlines"),
         "PYTHONUNBUFFERED": "1",
+        "RAY_TMPDIR": str(ray_tmpdir),
         "SWANLAB_LOG_DIR": str(run_dir / "swanlab"),
         "SWANLAB_MODE": str(config["logging"]["swanlab_mode"]),
         "TOKENIZERS_PARALLELISM": "true",
@@ -380,6 +382,14 @@ def validate(config: dict[str, Any]) -> None:
             raise FileNotFoundError(f"model not found or incomplete: {path}")
     if config["trainer"]["n_gpus_per_node"] < 1:
         raise ValueError("trainer.n_gpus_per_node must be positive")
+    ray_tmpdir = Path(config["runtime"].get("ray_tmpdir", "/tmp/lfk-ray"))
+    if not ray_tmpdir.is_absolute():
+        raise ValueError("runtime.ray_tmpdir must be an absolute path")
+    socket_probe = ray_tmpdir / "session_2000-01-01_00-00-00_000000_99999999" / "sockets" / "plasma_store"
+    if len(os.fsencode(socket_probe)) > 107:
+        raise ValueError(
+            f"runtime.ray_tmpdir is too long for Ray AF_UNIX sockets: {ray_tmpdir}"
+        )
     robust_opd = config["distillation"].get("robust_opd")
     if robust_opd and robust_opd.get("enabled", False):
         if config["distillation"]["log_prob_top_k"] <= 0:
@@ -456,6 +466,7 @@ def launch(command: list[str], run_dir: Path, config: dict[str, Any]) -> int:
     env = os.environ.copy()
     env.update(managed_environment(config, run_dir))
     env.pop("RAY_ADDRESS", None)
+    Path(env["RAY_TMPDIR"]).mkdir(parents=True, exist_ok=True)
     (run_dir / "cache" / "outlines").mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "logs" / "train.log"
     update_status(run_dir, "running", started_at_utc=utc_now(), pid=os.getpid())

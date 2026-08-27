@@ -19,9 +19,14 @@ import torch.nn.functional as F
 from safetensors.torch import save_file
 
 from verl.trainer.ppo.robust_opd import (
+    DenseDiscreteLCBSupport,
+    _evenly_spaced_indices,
+    _quantiles,
     build_prefix_state_features,
+    compute_dense_discrete_lcb,
     compute_dense_discrete_ropd,
     load_projected_embedding_table,
+    prepare_dense_discrete_lcb_support,
     validate_dense_discrete_config,
 )
 
@@ -104,6 +109,27 @@ def test_prefix_features_exclude_current_action_token() -> None:
     torch.testing.assert_close(result[0, 1], expected_t1)
 
 
+def test_large_quantiles_use_deterministic_bounded_sample() -> None:
+    values = torch.arange(100, dtype=torch.float32)
+    first = _quantiles(values, max_quantile_samples=10)
+    second = _quantiles(values, max_quantile_samples=10)
+
+    assert first == second
+    assert first["mean"] == pytest.approx(49.5)
+    assert first["p50"] == pytest.approx(49.5)
+
+
+def test_large_sample_indices_never_round_past_tensor_end() -> None:
+    # Regression for CUDA float32 linspace rounding 26_535_087 up to
+    # 26_535_088, which produced an out-of-bounds diagnostic sample.
+    num_values = 26_535_088
+    indices = _evenly_spaced_indices(num_values, 1_000_000, torch.device("cpu"))
+
+    assert indices.numel() == 1_000_000
+    assert int(indices.min()) >= 0
+    assert int(indices.max()) < num_values
+
+
 def test_count_sketch_embedding_cache_is_reusable(tmp_path) -> None:
     model_dir = tmp_path / "model"
     cache_dir = tmp_path / "cache"
@@ -149,3 +175,120 @@ def test_rejects_impossible_minimum_neighbor_setting() -> None:
     config["minimum_neighbors"] = 2
     with pytest.raises(ValueError, match="must not exceed"):
         validate_dense_discrete_config(config)
+
+
+def _lcb_config() -> dict:
+    config = _config()
+    config.update(
+        {
+            "aggregation": "lcb_gate",
+            "action_evaluation": "sampled_token_exact",
+            "risk_aggregation": "max",
+            "lcb_lambda": 0.5,
+            "lcb_epsilon": 1e-6,
+            "max_request_slots": 8,
+        }
+    )
+    return config
+
+
+def test_lcb_support_requests_anchor_sampled_action_at_neighbor_state() -> None:
+    responses = torch.tensor([[10, 12], [20, 22]])
+    mask = torch.ones_like(responses, dtype=torch.bool)
+    features = torch.tensor(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[1.0, 0.0], [0.0, 1.0]],
+        ]
+    )
+    support = prepare_dense_discrete_lcb_support(
+        responses=responses,
+        response_mask=mask,
+        student_features=features,
+        teacher_features=features,
+        uids=np.array(["prompt-a", "prompt-a"], dtype=object),
+        config=_lcb_config(),
+    )
+
+    assert support.neighbor_valid.all()
+    for row, position, neighbor_rank in support.neighbor_valid.nonzero().tolist():
+        target_row = int(support.neighbor_rows[row, position, neighbor_rank])
+        target_position = int(support.neighbor_positions[row, position, neighbor_rank])
+        request_slot = int(support.request_slots[row, position, neighbor_rank])
+        assert support.request_ids[target_row, target_position, request_slot] == responses[row, position]
+    assert support.metrics["ropd/action_neighbor_weighted_coverage"] == pytest.approx(1.0)
+
+
+def test_lcb_shrinks_magnitude_without_changing_reward_sign() -> None:
+    mask = torch.ones(2, 2, dtype=torch.bool)
+    neighbor_rows = torch.tensor([[[1], [1]], [[0], [0]]])
+    neighbor_positions = torch.tensor([[[0], [1]], [[0], [1]]])
+    support = DenseDiscreteLCBSupport(
+        request_ids=torch.tensor([[[10], [12]], [[10], [12]]]),
+        neighbor_rows=neighbor_rows,
+        neighbor_positions=neighbor_positions,
+        request_slots=torch.zeros_like(neighbor_rows),
+        neighbor_valid=torch.ones_like(neighbor_rows, dtype=torch.bool),
+        student_distances=torch.zeros_like(neighbor_rows, dtype=torch.float32),
+        teacher_distances=torch.zeros_like(neighbor_rows, dtype=torch.float32),
+        metrics={"ropd/states": 4.0},
+    )
+    sampled_teacher = torch.tensor([[1.0, -2.0], [0.5, -1.0]])
+    sampled_student = torch.zeros_like(sampled_teacher)
+    raw_opd = torch.tensor(
+        [
+            [[1.0, -2.0], [3.0, -4.0]],
+            [[2.0, -1.0], [0.5, -0.25]],
+        ]
+    )
+    result = compute_dense_discrete_lcb(
+        sampled_student_log_probs=sampled_student,
+        sampled_teacher_log_probs=sampled_teacher,
+        neighbor_student_log_probs=torch.zeros(2, 2, 1),
+        neighbor_teacher_log_probs=sampled_teacher.unsqueeze(-1),
+        opd_raw_rewards=raw_opd,
+        opd_reward_weights=torch.full_like(raw_opd, 0.5),
+        response_mask=mask,
+        responses=torch.tensor([[10, 12], [10, 12]]),
+        uids=np.array(["prompt-a", "prompt-a"], dtype=object),
+        support=support,
+        config=_lcb_config(),
+    )
+    original = raw_opd * 0.5
+
+    assert torch.all(result.ropd_scores.abs() <= original.abs() + 1e-7)
+    assert torch.all(result.ropd_scores.sign() == original.sign())
+    assert result.metrics["ropd/trust_mean"] < 1.0
+    assert result.metrics["ropd/absolute_reward_reduction_mean"] >= 0.0
+
+
+def test_lcb_no_neighbor_falls_back_to_original_opd() -> None:
+    mask = torch.ones(1, 1, dtype=torch.bool)
+    support = DenseDiscreteLCBSupport(
+        request_ids=torch.zeros(1, 1, 1, dtype=torch.long),
+        neighbor_rows=torch.zeros(1, 1, 1, dtype=torch.long),
+        neighbor_positions=torch.zeros(1, 1, 1, dtype=torch.long),
+        request_slots=torch.zeros(1, 1, 1, dtype=torch.long),
+        neighbor_valid=torch.zeros(1, 1, 1, dtype=torch.bool),
+        student_distances=torch.full((1, 1, 1), float("nan")),
+        teacher_distances=torch.full((1, 1, 1), float("nan")),
+        metrics={"ropd/states": 1.0},
+    )
+    raw_opd = torch.tensor([[[1.0, -2.0]]])
+    weights = torch.tensor([[[0.25, 0.75]]])
+    result = compute_dense_discrete_lcb(
+        sampled_student_log_probs=torch.zeros(1, 1),
+        sampled_teacher_log_probs=torch.ones(1, 1),
+        neighbor_student_log_probs=torch.zeros(1, 1, 1),
+        neighbor_teacher_log_probs=torch.zeros(1, 1, 1),
+        opd_raw_rewards=raw_opd,
+        opd_reward_weights=weights,
+        response_mask=mask,
+        responses=torch.tensor([[10]]),
+        uids=np.array(["prompt-a"], dtype=object),
+        support=support,
+        config=_lcb_config(),
+    )
+
+    torch.testing.assert_close(result.ropd_scores, raw_opd * weights)
+    assert result.metrics["ropd/trust_mean"] == pytest.approx(1.0)

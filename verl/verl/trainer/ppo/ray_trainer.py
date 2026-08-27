@@ -1149,7 +1149,39 @@ class RayPPOTrainer:
                                 robust_opd_config = OmegaConf.to_container(robust_opd_config, resolve=True)
                             robust_opd_config = dict(robust_opd_config)
                             batch.meta_info["robust_opd"] = robust_opd_config
-                            
+
+                            robust_support = None
+                            if robust_opd_config.get("enabled", False):
+                                if top_k <= 0:
+                                    raise ValueError("Dense discrete ROPD requires log_prob_top_k > 0")
+                                if strategy != "only_stu":
+                                    raise ValueError("Dense discrete ROPD requires top_k_strategy='only_stu'")
+                                if self.config.actor_rollout_ref.rollout.n < 2:
+                                    raise ValueError("Dense discrete ROPD requires at least two rollouts per prompt")
+                                run_dir = Path(str(self.config.trainer.default_local_dir)).resolve().parent
+                                if self._dense_ropd_engine is None:
+                                    embedding_cache = robust_opd_config.get("embedding_cache_dir")
+                                    embedding_cache = embedding_cache or run_dir / "cache" / "robust_opd_embeddings"
+                                    self._dense_ropd_engine = DenseDiscreteROPDEngine(
+                                        config=robust_opd_config,
+                                        actor_model_path=self.config.actor_rollout_ref.model.path,
+                                        teacher_model_path=self.config.reward_model.model.path,
+                                        cache_root=embedding_cache,
+                                    )
+                                if robust_opd_config.get("aggregation", "hard_min") == "lcb_gate":
+                                    with marked_timer("prepare_robust_opd_support", timing_raw, color="red"):
+                                        robust_support = self._dense_ropd_engine.prepare_sampled_action_requests(batch)
+                                    request_ids = robust_support.request_ids.to(batch.batch["responses"].device)
+                                    batch.batch["ropd_neighbor_target_ids"] = request_ids
+                                    batch.batch["target_ids"] = request_ids
+                                    with marked_timer("compute_neighbor_student_log_prob", timing_raw, color="blue"):
+                                        neighbor_student = self.actor_rollout_wg.compute_log_probs_for_ids(batch)
+                                    batch.batch.pop("target_ids")
+                                    neighbor_student.batch["student_neighbor_request_log_probs"] = (
+                                        neighbor_student.batch.pop("student_log_probs_on_teacher_ids")
+                                    )
+                                    batch = batch.union(neighbor_student)
+
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
                                 teacher_data = self.rm_wg.compute_rm_score(batch)
                                 batch = batch.union(teacher_data)
@@ -1163,24 +1195,10 @@ class RayPPOTrainer:
                                     batch = batch.union(distillation_output)
 
                                 if robust_opd_config.get("enabled", False):
-                                    if top_k <= 0:
-                                        raise ValueError("Dense discrete ROPD requires log_prob_top_k > 0")
-                                    if strategy != "only_stu":
-                                        raise ValueError("Dense discrete ROPD requires top_k_strategy='only_stu'")
-                                    if self.config.actor_rollout_ref.rollout.n < 2:
-                                        raise ValueError("Dense discrete ROPD requires at least two rollouts per prompt")
-                                    run_dir = Path(str(self.config.trainer.default_local_dir)).resolve().parent
-                                    if self._dense_ropd_engine is None:
-                                        embedding_cache = robust_opd_config.get("embedding_cache_dir")
-                                        embedding_cache = embedding_cache or run_dir / "cache" / "robust_opd_embeddings"
-                                        self._dense_ropd_engine = DenseDiscreteROPDEngine(
-                                            config=robust_opd_config,
-                                            actor_model_path=self.config.actor_rollout_ref.model.path,
-                                            teacher_model_path=self.config.reward_model.model.path,
-                                            cache_root=embedding_cache,
-                                        )
                                     with marked_timer("compute_robust_opd", timing_raw, color="red"):
-                                        robust_result = self._dense_ropd_engine.compute(batch, self.global_steps)
+                                        robust_result = self._dense_ropd_engine.compute(
+                                            batch, self.global_steps, support=robust_support
+                                        )
                                     apply_to_training = bool(robust_opd_config.get("apply_to_training", False))
                                     metrics.update(robust_result.metrics)
                                     metrics["ropd/applied_to_training"] = float(apply_to_training)
@@ -1198,6 +1216,10 @@ class RayPPOTrainer:
                                         )
                                     batch.batch.pop("opd_raw_rewards", None)
                                     batch.batch.pop("opd_reward_weights", None)
+                                    batch.batch.pop("ropd_neighbor_target_ids", None)
+                                    batch.batch.pop("student_neighbor_request_log_probs", None)
+                                    batch.batch.pop("teacher_neighbor_request_log_probs", None)
+                                    batch.batch.pop("teacher_sampled_token_log_probs", None)
                         
                         # Plot overlapping tokens for Reverse KL
                         if (self.global_steps == 1 or self.global_steps % 10 == 0) and "student_valid_counts" in batch.batch.keys():

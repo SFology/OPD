@@ -1,0 +1,10 @@
+extends: opd_dense_discrete_lcb_base.yaml
+
+experiment:
+  name: opd_dense_discrete_lcb_treatment
+  description: Full one-epoch LCB-OPD treatment using exact sampled-action neighborhood scoring.
+  tags: [opd, lcb-opd, dense-discrete, treatment, full, exact-action, rtx6000-ada, auto-gpu]
+
+distillation:
+  robust_opd:
+    apply_to_training: true

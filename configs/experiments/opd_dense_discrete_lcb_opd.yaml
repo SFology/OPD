@@ -1,0 +1,10 @@
+extends: opd_dense_discrete_lcb_base.yaml
+
+experiment:
+  name: opd_dense_discrete_lcb_opd
+  description: Full one-epoch OPD control with exact-action LCB measured but not applied.
+  tags: [opd, lcb-opd, dense-discrete, control, full, exact-action, rtx6000-ada, auto-gpu]
+
+distillation:
+  robust_opd:
+    apply_to_training: false

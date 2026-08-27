@@ -2564,10 +2564,16 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         student_logp = data.batch["old_log_probs"]  # shape: [batch, response_len]
         
         student_top_k_ids = None
-        student_top_k_log_probs = None
+        neighbor_target_ids = None
+        anchor_top_k = 0
         if "student_top_k_ids" in data.batch.keys():
-             student_top_k_ids = data.batch["student_top_k_ids"]
-             student_top_k_log_probs = data.batch["student_top_k_log_probs"]
+            student_top_k_ids = data.batch["student_top_k_ids"]
+            anchor_top_k = student_top_k_ids.shape[-1]
+        if "ropd_neighbor_target_ids" in data.batch.keys():
+            if student_top_k_ids is None:
+                raise ValueError("Exact ROPD neighbor requests require student_top_k_ids")
+            neighbor_target_ids = data.batch["ropd_neighbor_target_ids"]
+            student_top_k_ids = torch.cat([student_top_k_ids, neighbor_target_ids], dim=-1)
         
         # Get global_steps from meta_info
         global_steps = data.meta_info.get("global_steps", -1)
@@ -2709,6 +2715,22 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 if teacher_in_student_mask is not None:
                     teacher_in_student_mask = teacher_in_student_mask[revert_indices]
 
+            teacher_neighbor_request_log_probs = None
+            if neighbor_target_ids is not None:
+                if teacher_on_student_logp is None:
+                    raise RuntimeError("Teacher did not return exact neighbor request log-probs")
+                teacher_neighbor_request_log_probs = teacher_on_student_logp[..., anchor_top_k:]
+                teacher_on_student_logp = teacher_on_student_logp[..., :anchor_top_k]
+                if teacher_overlap_mask is not None:
+                    teacher_overlap_mask = teacher_overlap_mask[..., :anchor_top_k]
+                if teacher_valid_counts is not None:
+                    teacher_valid_counts = torch.full_like(teacher_valid_counts, anchor_top_k)
+                if teacher_top_k_ids is not None:
+                    original_student_ids = data.batch["student_top_k_ids"]
+                    teacher_in_student_mask = (
+                        teacher_top_k_ids.unsqueeze(-1) == original_student_ids.unsqueeze(-2)
+                    ).any(dim=-1).float()
+
             if top_k > 0:
                 # Reward calculation is moved to ray_trainer for top_k > 0
                 # because it needs student_on_teacher_log_probs which requires another actor forward
@@ -2729,6 +2751,10 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             
             if teacher_on_student_logp is not None:
                 tensors["teacher_on_student_log_probs"] = teacher_on_student_logp
+
+            if teacher_neighbor_request_log_probs is not None:
+                tensors["teacher_sampled_token_log_probs"] = teacher_logp
+                tensors["teacher_neighbor_request_log_probs"] = teacher_neighbor_request_log_probs
 
             if teacher_top_k_ids is not None:
                 tensors["teacher_top_k_ids"] = teacher_top_k_ids

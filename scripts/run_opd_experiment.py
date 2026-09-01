@@ -497,6 +497,10 @@ def launch(command: list[str], run_dir: Path, config: dict[str, Any]) -> int:
     prepare_ray_tmpdir(config)
     (run_dir / "cache" / "outlines").mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "logs" / "train.log"
+    # Environment capture can take several minutes. Recheck immediately before
+    # spawning Ray so a GPU claimed after the initial preflight cannot cause a
+    # misleading vLLM KV-cache initialization failure.
+    gpu_preflight(config)
     update_status(run_dir, "running", started_at_utc=utc_now(), pid=os.getpid())
     with log_path.open("a", encoding="utf-8", buffering=1) as log:
         header = f"Run: {run_dir.name}\nCommand: {shlex.join(command)}\n"

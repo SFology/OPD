@@ -13,6 +13,8 @@ MIN_FREE_MIB=43000
 MAX_UTIL=10
 STABLE_SAMPLES=3
 POLL_SECONDS=30
+MAX_STARTUP_RETRIES=3
+RETRY_DELAY_SECONDS=60
 SESSION=opd-lcb-comparison
 WORKER=false
 ORCH_LOG=
@@ -21,6 +23,7 @@ usage() {
     echo "Usage: $0 [--mode probe|full] [--session NAME]"
     echo "          [--gpu-count N] [--min-free-mib N] [--max-util N]"
     echo "          [--stable-samples N] [--poll-seconds N]"
+    echo "          [--max-startup-retries N] [--retry-delay-seconds N]"
 }
 
 while (($#)); do
@@ -32,6 +35,8 @@ while (($#)); do
         --max-util) MAX_UTIL=$2; shift 2 ;;
         --stable-samples) STABLE_SAMPLES=$2; shift 2 ;;
         --poll-seconds) POLL_SECONDS=$2; shift 2 ;;
+        --max-startup-retries) MAX_STARTUP_RETRIES=$2; shift 2 ;;
+        --retry-delay-seconds) RETRY_DELAY_SECONDS=$2; shift 2 ;;
         --worker) WORKER=true; shift ;;
         --orchestration-log) ORCH_LOG=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -43,11 +48,13 @@ case "$MODE" in
     probe|full) ;;
     *) echo "Invalid --mode: $MODE" >&2; exit 2 ;;
 esac
-for value in "$GPU_COUNT" "$MIN_FREE_MIB" "$MAX_UTIL" "$STABLE_SAMPLES" "$POLL_SECONDS"; do
+for value in \
+    "$GPU_COUNT" "$MIN_FREE_MIB" "$MAX_UTIL" "$STABLE_SAMPLES" "$POLL_SECONDS" \
+    "$MAX_STARTUP_RETRIES" "$RETRY_DELAY_SECONDS"; do
     [[ "$value" =~ ^[0-9]+$ ]] || { echo "Numeric options must be non-negative integers" >&2; exit 2; }
 done
-((GPU_COUNT >= 1 && STABLE_SAMPLES >= 1 && POLL_SECONDS >= 1)) || {
-    echo "gpu-count, stable-samples, and poll-seconds must be positive" >&2
+((GPU_COUNT >= 1 && STABLE_SAMPLES >= 1 && POLL_SECONDS >= 1 && RETRY_DELAY_SECONDS >= 1)) || {
+    echo "gpu-count, stable-samples, poll-seconds, and retry-delay-seconds must be positive" >&2
     exit 2
 }
 
@@ -68,6 +75,7 @@ if [[ "$WORKER" != true ]]; then
         --mode "$MODE" --session "$SESSION" --gpu-count "$GPU_COUNT"
         --min-free-mib "$MIN_FREE_MIB" --max-util "$MAX_UTIL"
         --stable-samples "$STABLE_SAMPLES" --poll-seconds "$POLL_SECONDS"
+        --max-startup-retries "$MAX_STARTUP_RETRIES" --retry-delay-seconds "$RETRY_DELAY_SECONDS"
     )
     printf -v worker_command '%q ' "${worker[@]}"
     "$TMUX_BIN" new-session -d -s "$SESSION" "bash -lc '$worker_command'"
@@ -93,6 +101,7 @@ export OPD_MODEL_DIR=$MODEL_DIR
 
 echo "Started at $(date -u --iso-8601=seconds)"
 echo "Mode=$MODE GPU_COUNT=$GPU_COUNT MIN_FREE_MIB=$MIN_FREE_MIB MAX_UTIL=$MAX_UTIL"
+echo "MAX_STARTUP_RETRIES=$MAX_STARTUP_RETRIES RETRY_DELAY_SECONDS=$RETRY_DELAY_SECONDS"
 
 if pgrep -u "$(id -u)" -af 'verl[.]trainer[.]main_ppo' >/dev/null; then
     echo "Refusing to start because another OPD/verl training process is running for this user:" >&2
@@ -137,19 +146,57 @@ select_stable_gpus() {
 
 run_managed() {
     local config=$1 label=$2
-    select_stable_gpus
-    echo "Starting $label with GPUs $SELECTED_GPUS"
-    python -u scripts/run_opd_experiment.py "$config" \
-        --set "trainer.n_gpus_per_node=$GPU_COUNT" \
-        --set "runtime.cuda_visible_devices=$SELECTED_GPUS" \
-        --set "runtime.min_free_gpu_memory_mb=$MIN_FREE_MIB"
-    echo "Completed $label at $(date -u --iso-8601=seconds)"
+    local attempt=0 exit_code=0 attempt_log= run_dir= label_slug=
+    label_slug=$(tr '[:upper:] ' '[:lower:]-' <<<"$label" | tr -cd '[:alnum:]_-')
+    while true; do
+        attempt=$((attempt + 1))
+        select_stable_gpus
+        attempt_log=${ORCH_LOG%.log}_${label_slug}_attempt${attempt}.log
+        echo "Starting $label attempt=$attempt with GPUs $SELECTED_GPUS"
+        set +e
+        python -u scripts/run_opd_experiment.py "$config" \
+            --set "trainer.n_gpus_per_node=$GPU_COUNT" \
+            --set "runtime.cuda_visible_devices=$SELECTED_GPUS" \
+            --set "runtime.min_free_gpu_memory_mb=$MIN_FREE_MIB" 2>&1 | tee "$attempt_log"
+        exit_code=${PIPESTATUS[0]}
+        set -e
+        if ((exit_code == 0)); then
+            echo "Completed $label at $(date -u --iso-8601=seconds)"
+            return 0
+        fi
+
+        run_dir=$(sed -n 's/^RUN_DIR=//p' "$attempt_log" | head -n 1)
+        if ! grep -Eq \
+            'No available memory for the cache blocks|below the configured [0-9]+ MiB safety threshold' \
+            "$attempt_log"; then
+            echo "$label failed with a non-retryable error; inspect $attempt_log" >&2
+            return "$exit_code"
+        fi
+        if [[ -n "$run_dir" && -s "$run_dir/metrics/ropd_step_metrics.jsonl" ]]; then
+            echo "$label reached training metrics; refusing an automatic from-scratch retry" >&2
+            return "$exit_code"
+        fi
+        if [[ -n "$run_dir" ]] && find "$run_dir/checkpoints" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+            echo "$label wrote checkpoints; refusing an automatic from-scratch retry" >&2
+            return "$exit_code"
+        fi
+        if ((attempt > MAX_STARTUP_RETRIES)); then
+            echo "$label exhausted $MAX_STARTUP_RETRIES startup retries; inspect $attempt_log" >&2
+            return "$exit_code"
+        fi
+        echo "Retryable GPU preflight or vLLM KV-cache failure before training."
+        echo "Waiting ${RETRY_DELAY_SECONDS}s, then selecting GPUs again."
+        sleep "$RETRY_DELAY_SECONDS"
+    done
 }
 
 if [[ "$MODE" == probe ]]; then
     run_managed configs/experiments/opd_dense_discrete_lcb_opd_probe.yaml "OPD control probe"
     run_managed configs/experiments/opd_dense_discrete_lcb_treatment_probe.yaml "LCB-OPD treatment probe"
 else
+    # Exercise exact sampled-action scoring and the applied LCB reward before
+    # committing multiple days to the paired full runs.
+    run_managed configs/experiments/opd_dense_discrete_lcb_treatment_probe.yaml "LCB-OPD startup probe"
     run_managed configs/experiments/opd_dense_discrete_lcb_opd.yaml "OPD control full run"
     run_managed configs/experiments/opd_dense_discrete_lcb_treatment.yaml "LCB-OPD treatment full run"
 fi

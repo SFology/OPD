@@ -5,6 +5,12 @@ experiment:
   description: Controlled OPD/LCB-OPD comparison with exact sampled-action scoring in dense discrete neighborhoods.
   tags: [opd, lcb-opd, dense-discrete, controlled-comparison, exact-action, rtx6000-ada, auto-gpu]
 
+# 0.35 was marginal for vLLM's non-KV initialization footprint and produced
+# zero available KV-cache blocks on an otherwise empty RTX 6000 Ada. 0.45
+# leaves a usable cache budget while remaining below the tested 0.55 baseline.
+rollout:
+  gpu_memory_utilization: 0.45
+
 # Both arms compute the same exact-action LCB diagnostics. Child configs change
 # only apply_to_training, so the comparison has matched measurement overhead.
 distillation:

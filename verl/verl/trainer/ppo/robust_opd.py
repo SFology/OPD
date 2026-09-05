@@ -47,9 +47,11 @@ class DenseDiscreteROPDResult:
 
 @dataclass
 class DenseDiscreteLCBSupport:
-    """Neighbor geometry and reverse-scattered sampled-action requests."""
+    """Neighbor geometry and trajectory-packed sampled-action requests."""
 
-    request_ids: torch.Tensor
+    request_positions: torch.Tensor
+    request_action_ids: torch.Tensor
+    request_valid: torch.Tensor
     neighbor_rows: torch.Tensor
     neighbor_positions: torch.Tensor
     request_slots: torch.Tensor
@@ -110,8 +112,8 @@ def validate_dense_discrete_config(config: dict[str, Any]) -> None:
             raise ValueError("robust_opd.lcb_lambda must be non-negative")
         if float(config.get("lcb_epsilon", 1e-6)) <= 0:
             raise ValueError("robust_opd.lcb_epsilon must be positive")
-        if int(config.get("max_request_slots", 128)) < 1:
-            raise ValueError("robust_opd.max_request_slots must be positive")
+        if int(config.get("max_sparse_requests_per_trajectory", 65536)) < 1:
+            raise ValueError("robust_opd.max_sparse_requests_per_trajectory must be positive")
 
 
 def _model_fingerprint(model_path: Path, projection_dim: int, seed: int, projection_method: str) -> str:
@@ -306,9 +308,11 @@ def prepare_dense_discrete_lcb_support(
 
     A directed anchor-to-neighbor edge asks both models to evaluate the
     anchor's sampled action at the neighbor state. Requests are reverse
-    scattered to target states and deduplicated by ``(state, token_id)`` so a
-    single additional student forward and the existing teacher forward can
-    score all selected edges.
+    packed by target trajectory and deduplicated by ``(state, token_id)``.
+    Unlike a ``[batch, response, max_actions_per_state]`` tensor, this sparse
+    layout does not replicate one unusually busy state's action width across
+    every token in the batch. Both models can score the requests while their
+    trajectory logits are already resident.
     """
 
     validate_dense_discrete_config(config)
@@ -425,9 +429,12 @@ def prepare_dense_discrete_lcb_support(
     valid_edges = neighbor_valid.nonzero(as_tuple=False)
     request_slots = torch.zeros_like(neighbor_rows)
     if len(valid_edges) == 0:
-        request_ids = torch.zeros(batch_size, response_length, 1, dtype=torch.long)
+        request_positions = torch.zeros(batch_size, 1, dtype=torch.long)
+        request_action_ids = torch.zeros_like(request_positions)
+        request_valid = torch.zeros_like(request_positions, dtype=torch.bool)
         unique_request_count = 0
-        max_slots = 1
+        max_state_slots = 0
+        max_trajectory_requests = 0
     else:
         anchor_rows = valid_edges[:, 0]
         anchor_positions = valid_edges[:, 1]
@@ -440,19 +447,26 @@ def prepare_dense_discrete_lcb_support(
         unique_keys, inverse = torch.unique(keys, sorted=True, return_inverse=True)
         unique_targets = torch.div(unique_keys, vocabulary_size, rounding_mode="floor")
         unique_actions = torch.remainder(unique_keys, vocabulary_size)
-        request_counts = torch.bincount(unique_targets, minlength=batch_size * response_length)
-        max_slots = max(int(request_counts.max()), 1)
-        configured_max = int(config.get("max_request_slots", 128))
-        if max_slots > configured_max:
+        state_request_counts = torch.bincount(unique_targets, minlength=batch_size * response_length)
+        max_state_slots = int(state_request_counts.max())
+        unique_target_rows = torch.div(unique_targets, response_length, rounding_mode="floor")
+        unique_target_positions = torch.remainder(unique_targets, response_length)
+        trajectory_request_counts = torch.bincount(unique_target_rows, minlength=batch_size)
+        max_trajectory_requests = max(int(trajectory_request_counts.max()), 1)
+        configured_max = int(config.get("max_sparse_requests_per_trajectory", 65536))
+        if max_trajectory_requests > configured_max:
             raise RuntimeError(
-                f"Exact neighbor requests need {max_slots} slots at one state, exceeding "
-                f"robust_opd.max_request_slots={configured_max}; increase the explicit limit"
+                f"Exact neighbor requests need {max_trajectory_requests} sparse entries for one trajectory, "
+                f"exceeding robust_opd.max_sparse_requests_per_trajectory={configured_max}"
             )
-        group_starts = torch.cumsum(request_counts, dim=0) - request_counts
-        unique_slots = torch.arange(len(unique_keys)) - group_starts[unique_targets]
-        request_ids = torch.zeros(batch_size * response_length, max_slots, dtype=torch.long)
-        request_ids[unique_targets, unique_slots] = unique_actions
-        request_ids = request_ids.view(batch_size, response_length, max_slots)
+        trajectory_starts = torch.cumsum(trajectory_request_counts, dim=0) - trajectory_request_counts
+        unique_slots = torch.arange(len(unique_keys)) - trajectory_starts[unique_target_rows]
+        request_positions = torch.zeros(batch_size, max_trajectory_requests, dtype=torch.long)
+        request_action_ids = torch.zeros_like(request_positions)
+        request_valid = torch.zeros_like(request_positions, dtype=torch.bool)
+        request_positions[unique_target_rows, unique_slots] = unique_target_positions
+        request_action_ids[unique_target_rows, unique_slots] = unique_actions
+        request_valid[unique_target_rows, unique_slots] = True
         request_slots[neighbor_valid] = unique_slots[inverse]
         unique_request_count = len(unique_keys)
 
@@ -477,7 +491,10 @@ def prepare_dense_discrete_lcb_support(
         "ropd/exact_request_edges": float(edge_count),
         "ropd/exact_request_unique": float(unique_request_count),
         "ropd/exact_request_dedup_fraction": 1.0 - unique_request_count / max(edge_count, 1),
-        "ropd/exact_request_max_slots": float(max_slots),
+        "ropd/exact_request_max_per_state": float(max_state_slots),
+        "ropd/exact_request_max_per_trajectory": float(max_trajectory_requests),
+        "ropd/exact_request_packing_fraction": unique_request_count
+        / max(batch_size * max(max_trajectory_requests, 1), 1),
         "ropd/selected_student_distance_mean": float(valid_student_distances.mean()) if edge_count else float("nan"),
         "ropd/selected_teacher_distance_mean": float(valid_teacher_distances.mean()) if edge_count else float("nan"),
         "ropd/selected_student_distance_std": float(valid_student_distances.std(unbiased=False))
@@ -488,7 +505,9 @@ def prepare_dense_discrete_lcb_support(
         else float("nan"),
     }
     return DenseDiscreteLCBSupport(
-        request_ids=request_ids,
+        request_positions=request_positions,
+        request_action_ids=request_action_ids,
+        request_valid=request_valid,
         neighbor_rows=neighbor_rows,
         neighbor_positions=neighbor_positions,
         request_slots=request_slots,
@@ -529,15 +548,16 @@ def compute_dense_discrete_lcb(
         raise ValueError("Sampled-action log-probs must match response_mask")
     if raw_opd.shape != weights.shape or raw_opd.shape[:2] != mask.shape:
         raise ValueError("Top-K OPD rewards and weights have inconsistent shapes")
-    if neighbor_student.shape != support.request_ids.shape or neighbor_teacher.shape != support.request_ids.shape:
-        raise ValueError("Exact neighbor log-probs do not match prepared request IDs")
+    request_shape = support.request_positions.shape
+    if neighbor_student.shape != request_shape or neighbor_teacher.shape != request_shape:
+        raise ValueError("Exact neighbor log-probs do not match prepared sparse requests")
 
     rows = support.neighbor_rows
     positions = support.neighbor_positions
     slots = support.request_slots
     valid = support.neighbor_valid
-    neighbor_student_selected = neighbor_student[rows, positions, slots]
-    neighbor_teacher_selected = neighbor_teacher[rows, positions, slots]
+    neighbor_student_selected = neighbor_student[rows, slots]
+    neighbor_teacher_selected = neighbor_teacher[rows, slots]
     neighbor_rewards = neighbor_teacher_selected - neighbor_student_selected
     anchor_reward = sampled_teacher - sampled_student
     deviations = (neighbor_rewards - anchor_reward.unsqueeze(-1)).abs()

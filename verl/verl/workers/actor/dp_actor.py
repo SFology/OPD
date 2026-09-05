@@ -34,6 +34,10 @@ from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
+from verl.utils.sparse_log_probs import (
+    gather_sparse_packed_response_log_probs,
+    gather_sparse_response_log_probs,
+)
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor import BasePPOActor
@@ -85,13 +89,14 @@ class DataParallelPPOActor(BasePPOActor):
 
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False, top_k=0, student_top_k_ids=None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
             topk_ids: # (bs, response_len, k)
             topk_log_probs: # (bs, response_len, k)
+            sparse_log_probs: # (bs, max sparse requests per trajectory)
         """
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -108,6 +113,15 @@ class DataParallelPPOActor(BasePPOActor):
             entropy = None
             topk_ids = None
             topk_log_probs = None
+            sparse_log_probs = None
+            sparse_positions = micro_batch.get("ropd_sparse_positions")
+            sparse_action_ids = micro_batch.get("ropd_sparse_action_ids")
+            sparse_valid = micro_batch.get("ropd_sparse_valid")
+            sparse_requested = sparse_positions is not None
+            if sparse_requested and (sparse_action_ids is None or sparse_valid is None):
+                raise ValueError("Sparse ROPD positions, action ids, and validity mask must be provided together")
+            if sparse_requested and self.use_ulysses_sp:
+                raise ValueError("Sparse exact-action ROPD currently requires ulysses_sequence_parallel_size=1")
             
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
@@ -181,7 +195,7 @@ class DataParallelPPOActor(BasePPOActor):
                     **extra_args,
                 )  # prevent model thinks we are generating
                 
-                need_logits = top_k > 0
+                need_logits = top_k > 0 or sparse_requested
 
                 if self.use_fused_kernels and not need_logits:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -190,6 +204,17 @@ class DataParallelPPOActor(BasePPOActor):
                 else:
                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                     logits_rmpad.div_(temperature)
+
+                    if sparse_requested:
+                        sparse_log_probs = gather_sparse_packed_response_log_probs(
+                            logits_rmpad,
+                            indices,
+                            sequence_length=seqlen,
+                            response_length=response_length,
+                            positions=sparse_positions,
+                            action_ids=sparse_action_ids,
+                            valid=sparse_valid,
+                        )
 
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                     inplace_backward = True
@@ -352,7 +377,7 @@ class DataParallelPPOActor(BasePPOActor):
                     **extra_args,
                 )  # prevent model thinks we are generating
                 
-                need_logits = top_k > 0
+                need_logits = top_k > 0 or sparse_requested
                 if self.use_fused_kernels and not need_logits:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
                     entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
@@ -362,6 +387,11 @@ class DataParallelPPOActor(BasePPOActor):
 
                     logits.div_(temperature)
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
+
+                    if sparse_requested:
+                        sparse_log_probs = gather_sparse_response_log_probs(
+                            logits, sparse_positions, sparse_action_ids, sparse_valid
+                        )
                     
                     # Optimization: when top_k > 0, compute log_softmax once and gather both
                     # log_probs and topk_log_probs to avoid duplicate computation
@@ -392,7 +422,7 @@ class DataParallelPPOActor(BasePPOActor):
                         # Use pre-computed log_probs_all (always available when need_topk=True)
                         topk_log_probs = log_probs_all.gather(dim=-1, index=topk_ids)
 
-            return entropy, log_probs, topk_ids, topk_log_probs
+            return entropy, log_probs, topk_ids, topk_log_probs, sparse_log_probs
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_probs_for_ids(self, data: DataProto) -> torch.Tensor:
@@ -432,7 +462,7 @@ class DataParallelPPOActor(BasePPOActor):
             mb_target_ids = model_inputs["target_ids"]
             with torch.no_grad():
                 # We reuse _forward_micro_batch. It returns (entropy, log_probs, topk_ids, topk_log_probs)
-                _, _, _, topk_log_probs = self._forward_micro_batch(
+                _, _, _, topk_log_probs, _ = self._forward_micro_batch(
                     model_inputs, temperature=temperature, calculate_entropy=False, 
                     top_k=top_k, student_top_k_ids=mb_target_ids
                 )
@@ -496,7 +526,7 @@ class DataParallelPPOActor(BasePPOActor):
                 model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                 mb_target_ids = model_inputs["teacher_top_k_ids"]
                 with torch.no_grad():
-                    _, _, _, topk_log_probs = self._forward_micro_batch(
+                    _, _, _, topk_log_probs, _ = self._forward_micro_batch(
                         model_inputs, temperature=temperature, calculate_entropy=False, 
                         top_k=top_k, student_top_k_ids=mb_target_ids
                     )
@@ -687,6 +717,11 @@ class DataParallelPPOActor(BasePPOActor):
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        sparse_keys = ["ropd_sparse_positions", "ropd_sparse_action_ids", "ropd_sparse_valid"]
+        if any(key in data.batch for key in sparse_keys):
+            if not all(key in data.batch for key in sparse_keys):
+                raise ValueError("Incomplete sparse ROPD request tensors")
+            select_keys.extend(sparse_keys)
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
@@ -703,12 +738,13 @@ class DataParallelPPOActor(BasePPOActor):
         entropy_lst = []
         topk_ids_lst = []
         topk_log_probs_lst = []
+        sparse_log_probs_lst = []
 
         for micro_batch in micro_batches:
             micro_batch = micro_batch.to(get_device_id())
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs, topk_ids, topk_log_probs = self._forward_micro_batch(
+                entropy, log_probs, topk_ids, topk_log_probs, sparse_log_probs = self._forward_micro_batch(
                     model_inputs, temperature=temperature, calculate_entropy=calculate_entropy, top_k=top_k
                 )
             # Keep on GPU to avoid expensive CPU-GPU transfer for large top-k
@@ -722,6 +758,8 @@ class DataParallelPPOActor(BasePPOActor):
                 # topk_log_probs = topk_log_probs.to("cpu")
                 topk_ids_lst.append(topk_ids)
                 topk_log_probs_lst.append(topk_log_probs)
+            if sparse_log_probs is not None:
+                sparse_log_probs_lst.append(sparse_log_probs)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
@@ -734,6 +772,10 @@ class DataParallelPPOActor(BasePPOActor):
             topk_ids_tensor = torch.concat(topk_ids_lst, dim=0)
             topk_log_probs_tensor = torch.concat(topk_log_probs_lst, dim=0)
 
+        sparse_log_probs_tensor = None
+        if sparse_log_probs_lst:
+            sparse_log_probs_tensor = torch.concat(sparse_log_probs_lst, dim=0)
+
         if use_dynamic_bsz:
             log_probs = restore_dynamic_batch(log_probs, batch_idx_list)
             if calculate_entropy:
@@ -741,8 +783,10 @@ class DataParallelPPOActor(BasePPOActor):
             if top_k > 0:
                 topk_ids_tensor = restore_dynamic_batch(topk_ids_tensor, batch_idx_list)
                 topk_log_probs_tensor = restore_dynamic_batch(topk_log_probs_tensor, batch_idx_list)
+            if sparse_log_probs_tensor is not None:
+                sparse_log_probs_tensor = restore_dynamic_batch(sparse_log_probs_tensor, batch_idx_list)
 
-        return log_probs, entropys, topk_ids_tensor, topk_log_probs_tensor
+        return log_probs, entropys, topk_ids_tensor, topk_log_probs_tensor, sparse_log_probs_tensor
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
@@ -850,7 +894,7 @@ class DataParallelPPOActor(BasePPOActor):
                         elif "student_top_k_ids" in model_inputs:
                             student_top_k_ids = model_inputs["student_top_k_ids"]
 
-                        entropy, _, _, topk_log_probs = self._forward_micro_batch(
+                        entropy, _, _, topk_log_probs, _ = self._forward_micro_batch(
                             model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
                             top_k=top_k, student_top_k_ids=student_top_k_ids
                         )

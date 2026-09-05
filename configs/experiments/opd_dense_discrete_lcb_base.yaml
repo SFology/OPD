@@ -48,9 +48,10 @@ distillation:
     neighbor_k: 3
     minimum_neighbors: 1
 
-    # Fail explicitly instead of silently dropping exact-action requests if a
-    # pathological batch sends too many unique actions to one target state.
-    max_request_slots: 128
+    # Requests are packed as (response position, action id) per target
+    # trajectory, rather than padding every state to a global action width.
+    # Keep an explicit safety bound for genuinely pathological trajectories.
+    max_sparse_requests_per_trajectory: 65536
     anchor_chunk_size: 256
     sample_records_per_step: 128
 

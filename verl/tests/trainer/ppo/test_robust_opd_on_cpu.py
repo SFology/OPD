@@ -29,6 +29,10 @@ from verl.trainer.ppo.robust_opd import (
     prepare_dense_discrete_lcb_support,
     validate_dense_discrete_config,
 )
+from verl.utils.sparse_log_probs import (
+    gather_sparse_packed_response_log_probs,
+    gather_sparse_response_log_probs,
+)
 
 
 def _config() -> dict:
@@ -130,6 +134,44 @@ def test_large_sample_indices_never_round_past_tensor_end() -> None:
     assert int(indices.max()) < num_values
 
 
+def test_sparse_response_log_probs_match_dense_log_softmax() -> None:
+    logits = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4) / 7
+    positions = torch.tensor([[0, 2, 0], [1, 0, 0]])
+    actions = torch.tensor([[3, 1, 0], [2, 0, 0]])
+    valid = torch.tensor([[True, True, False], [True, True, False]])
+
+    actual = gather_sparse_response_log_probs(logits, positions, actions, valid)
+    dense = torch.log_softmax(logits, dim=-1)
+
+    torch.testing.assert_close(actual[0, :2], dense[0, [0, 2], [3, 1]])
+    torch.testing.assert_close(actual[1, :2], dense[1, [1, 0], [2, 0]])
+    assert torch.equal(actual[:, 2], torch.zeros(2))
+
+
+def test_sparse_packed_log_probs_preserve_response_alignment() -> None:
+    full_logits = torch.arange(40, dtype=torch.float32).reshape(2, 5, 4) / 9
+    attention_mask = torch.tensor([[False, True, True, True, True], [True, True, True, True, True]])
+    indices = attention_mask.reshape(-1).nonzero(as_tuple=True)[0]
+    packed_logits = full_logits.reshape(-1, 4)[indices]
+    positions = torch.tensor([[0, 1], [1, 0]])
+    actions = torch.tensor([[1, 3], [2, 0]])
+    valid = torch.ones_like(positions, dtype=torch.bool)
+
+    actual = gather_sparse_packed_response_log_probs(
+        packed_logits,
+        indices,
+        sequence_length=5,
+        response_length=2,
+        positions=positions,
+        action_ids=actions,
+        valid=valid,
+    )
+    dense = torch.log_softmax(full_logits[:, 2:4], dim=-1)
+
+    torch.testing.assert_close(actual[0], dense[0, [0, 1], [1, 3]])
+    torch.testing.assert_close(actual[1], dense[1, [1, 0], [2, 0]])
+
+
 def test_count_sketch_embedding_cache_is_reusable(tmp_path) -> None:
     model_dir = tmp_path / "model"
     cache_dir = tmp_path / "cache"
@@ -186,7 +228,7 @@ def _lcb_config() -> dict:
             "risk_aggregation": "max",
             "lcb_lambda": 0.5,
             "lcb_epsilon": 1e-6,
-            "max_request_slots": 8,
+            "max_sparse_requests_per_trajectory": 32,
         }
     )
     return config
@@ -215,8 +257,37 @@ def test_lcb_support_requests_anchor_sampled_action_at_neighbor_state() -> None:
         target_row = int(support.neighbor_rows[row, position, neighbor_rank])
         target_position = int(support.neighbor_positions[row, position, neighbor_rank])
         request_slot = int(support.request_slots[row, position, neighbor_rank])
-        assert support.request_ids[target_row, target_position, request_slot] == responses[row, position]
+        assert support.request_positions[target_row, request_slot] == target_position
+        assert support.request_action_ids[target_row, request_slot] == responses[row, position]
+        assert support.request_valid[target_row, request_slot]
     assert support.metrics["ropd/action_neighbor_weighted_coverage"] == pytest.approx(1.0)
+
+
+def test_lcb_sparse_support_does_not_impose_a_global_per_state_width() -> None:
+    batch_size = 130
+    responses = torch.arange(10, 10 + batch_size).reshape(batch_size, 1)
+    mask = torch.ones_like(responses, dtype=torch.bool)
+    features = torch.tensor([1.0, 0.0]).repeat(batch_size, 1, 1)
+    config = _lcb_config()
+    config.update(
+        {
+            "neighbor_k": batch_size - 1,
+            "max_sparse_requests_per_trajectory": 256,
+        }
+    )
+
+    support = prepare_dense_discrete_lcb_support(
+        responses=responses,
+        response_mask=mask,
+        student_features=features,
+        teacher_features=features,
+        uids=np.full(batch_size, "prompt-a", dtype=object),
+        config=config,
+    )
+
+    assert support.metrics["ropd/exact_request_max_per_state"] == batch_size - 1
+    assert support.request_action_ids.shape == (batch_size, batch_size - 1)
+    assert support.request_valid.all()
 
 
 def test_lcb_shrinks_magnitude_without_changing_reward_sign() -> None:
@@ -224,10 +295,12 @@ def test_lcb_shrinks_magnitude_without_changing_reward_sign() -> None:
     neighbor_rows = torch.tensor([[[1], [1]], [[0], [0]]])
     neighbor_positions = torch.tensor([[[0], [1]], [[0], [1]]])
     support = DenseDiscreteLCBSupport(
-        request_ids=torch.tensor([[[10], [12]], [[10], [12]]]),
+        request_positions=torch.tensor([[0, 1], [0, 1]]),
+        request_action_ids=torch.tensor([[10, 12], [10, 12]]),
+        request_valid=torch.ones(2, 2, dtype=torch.bool),
         neighbor_rows=neighbor_rows,
         neighbor_positions=neighbor_positions,
-        request_slots=torch.zeros_like(neighbor_rows),
+        request_slots=torch.tensor([[[0], [1]], [[0], [1]]]),
         neighbor_valid=torch.ones_like(neighbor_rows, dtype=torch.bool),
         student_distances=torch.zeros_like(neighbor_rows, dtype=torch.float32),
         teacher_distances=torch.zeros_like(neighbor_rows, dtype=torch.float32),
@@ -244,8 +317,8 @@ def test_lcb_shrinks_magnitude_without_changing_reward_sign() -> None:
     result = compute_dense_discrete_lcb(
         sampled_student_log_probs=sampled_student,
         sampled_teacher_log_probs=sampled_teacher,
-        neighbor_student_log_probs=torch.zeros(2, 2, 1),
-        neighbor_teacher_log_probs=sampled_teacher.unsqueeze(-1),
+        neighbor_student_log_probs=torch.zeros(2, 2),
+        neighbor_teacher_log_probs=sampled_teacher,
         opd_raw_rewards=raw_opd,
         opd_reward_weights=torch.full_like(raw_opd, 0.5),
         response_mask=mask,
@@ -265,7 +338,9 @@ def test_lcb_shrinks_magnitude_without_changing_reward_sign() -> None:
 def test_lcb_no_neighbor_falls_back_to_original_opd() -> None:
     mask = torch.ones(1, 1, dtype=torch.bool)
     support = DenseDiscreteLCBSupport(
-        request_ids=torch.zeros(1, 1, 1, dtype=torch.long),
+        request_positions=torch.zeros(1, 1, dtype=torch.long),
+        request_action_ids=torch.zeros(1, 1, dtype=torch.long),
+        request_valid=torch.zeros(1, 1, dtype=torch.bool),
         neighbor_rows=torch.zeros(1, 1, 1, dtype=torch.long),
         neighbor_positions=torch.zeros(1, 1, 1, dtype=torch.long),
         request_slots=torch.zeros(1, 1, 1, dtype=torch.long),
@@ -279,8 +354,8 @@ def test_lcb_no_neighbor_falls_back_to_original_opd() -> None:
     result = compute_dense_discrete_lcb(
         sampled_student_log_probs=torch.zeros(1, 1),
         sampled_teacher_log_probs=torch.ones(1, 1),
-        neighbor_student_log_probs=torch.zeros(1, 1, 1),
-        neighbor_teacher_log_probs=torch.zeros(1, 1, 1),
+        neighbor_student_log_probs=torch.zeros(1, 1),
+        neighbor_teacher_log_probs=torch.zeros(1, 1),
         opd_raw_rewards=raw_opd,
         opd_reward_weights=weights,
         response_mask=mask,

@@ -1119,15 +1119,6 @@ class RayPPOTrainer:
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            with marked_timer("compute_log_prob", timing_raw, color="blue"):
-                                # First forward, get student top k ids and log probs
-                                print("First forward, get student top k ids and log probs")
-                                old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-
-                                # if "entropys" in old_log_prob.batch.keys():
-                                #    old_log_prob.batch.pop("entropys")
-                                batch = batch.union(old_log_prob)
-
                             # Get Top-K parameters from config
                             top_k = self.config.actor_rollout_ref.rollout.get("log_prob_top_k", 0)
                             strategy = self.config.actor_rollout_ref.rollout.get("top_k_strategy", "only_stu")
@@ -1171,16 +1162,20 @@ class RayPPOTrainer:
                                 if robust_opd_config.get("aggregation", "hard_min") == "lcb_gate":
                                     with marked_timer("prepare_robust_opd_support", timing_raw, color="red"):
                                         robust_support = self._dense_ropd_engine.prepare_sampled_action_requests(batch)
-                                    request_ids = robust_support.request_ids.to(batch.batch["responses"].device)
-                                    batch.batch["ropd_neighbor_target_ids"] = request_ids
-                                    batch.batch["target_ids"] = request_ids
-                                    with marked_timer("compute_neighbor_student_log_prob", timing_raw, color="blue"):
-                                        neighbor_student = self.actor_rollout_wg.compute_log_probs_for_ids(batch)
-                                    batch.batch.pop("target_ids")
-                                    neighbor_student.batch["student_neighbor_request_log_probs"] = (
-                                        neighbor_student.batch.pop("student_log_probs_on_teacher_ids")
+                                    request_device = batch.batch["responses"].device
+                                    batch.batch["ropd_sparse_positions"] = robust_support.request_positions.to(
+                                        request_device
                                     )
-                                    batch = batch.union(neighbor_student)
+                                    batch.batch["ropd_sparse_action_ids"] = robust_support.request_action_ids.to(
+                                        request_device
+                                    )
+                                    batch.batch["ropd_sparse_valid"] = robust_support.request_valid.to(request_device)
+
+                            with marked_timer("compute_log_prob", timing_raw, color="blue"):
+                                # The sparse exact-action requests, when present, are scored in this same forward.
+                                print("First forward, get student top k ids and log probs")
+                                old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                                batch = batch.union(old_log_prob)
 
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
                                 teacher_data = self.rm_wg.compute_rm_score(batch)
@@ -1216,7 +1211,9 @@ class RayPPOTrainer:
                                         )
                                     batch.batch.pop("opd_raw_rewards", None)
                                     batch.batch.pop("opd_reward_weights", None)
-                                    batch.batch.pop("ropd_neighbor_target_ids", None)
+                                    batch.batch.pop("ropd_sparse_positions", None)
+                                    batch.batch.pop("ropd_sparse_action_ids", None)
+                                    batch.batch.pop("ropd_sparse_valid", None)
                                     batch.batch.pop("student_neighbor_request_log_probs", None)
                                     batch.batch.pop("teacher_neighbor_request_log_probs", None)
                                     batch.batch.pop("teacher_sampled_token_log_probs", None)

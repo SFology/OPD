@@ -2,6 +2,9 @@
 
 The inference-only trustworthy-OPD reliability pilot is documented separately
 in [`TRUSTWORTHY_OPD_PILOT.md`](TRUSTWORTHY_OPD_PILOT.md).
+Ongoing engineering and scientific follow-ups are tracked in
+[`IMPROVEMENT_CHECKLIST.md`](IMPROVEMENT_CHECKLIST.md); completed items remain
+in that file with their verification evidence.
 
 Managed runs use one immutable `RUN_ID` for configuration, logs, checkpoints,
 rollouts, validation output, evaluation output, and SwanLab records. Runtime

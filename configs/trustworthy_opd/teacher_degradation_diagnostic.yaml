@@ -1,0 +1,39 @@
+schema_version: 1
+experiment:
+  name: teacher_degradation_diagnostic
+  output_root: "${OPD_STORAGE_ROOT}/teacher_degradation_diagnostic"
+  seed: 42
+
+source_run: "${OPD_STORAGE_ROOT}/trustworthy_opd/20260812_154919_trustworthy_opd_confirmatory_24k_medium"
+
+models:
+  teacher: "${OPD_MODEL_DIR}/JustRL-DeepSeek-1.5B"
+  dtype: bfloat16
+  device: cuda:0
+  attention_implementation: sdpa
+
+selection:
+  clean_states: 6
+  degraded_states: 6
+  clean_max_metric_truncated_rate: 0.0
+  degraded_min_metric_truncated_rate: 0.8333333333333334
+
+# A greedy teacher trajectory supplies the teacher-self prefix. The same
+# normalized progress as the selected student state is used for the handoff.
+reference_generation:
+  max_new_tokens: 8192
+conditions:
+  prefix_sources:
+    - prompt_only
+    - teacher_self_prefix
+    - student_prefix
+  decodings:
+    - name: greedy
+      temperature: 0.0
+      top_p: 1.0
+      samples: 1
+    - name: sample_t07
+      temperature: 0.7
+      top_p: 0.95
+      samples: 2
+  max_new_tokens: 8192

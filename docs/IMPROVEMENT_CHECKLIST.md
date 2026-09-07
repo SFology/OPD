@@ -32,6 +32,8 @@
     `verifier_correctness`；在不破坏上游 verl 接口的前提下增加清晰的别名或解释字段。
   - 验收：新实验的 resolved config、日志摘要和看板不再把教师误称为标量 reward model；三类指标可被
     独立定位。
+  - 已完成子项：2026-09-07 将 `true_reward_score` 恢复为可选监控字段；没有 verifier 分数的普通
+    OPD batch 不再因指标统计报错，并新增有/无该字段的 CPU 测试。整体命名与看板改进仍未完成。
 
 - [ ] **IMP-003（P0）建立独立、可复现的固定测试集评测流程。**
   - 问题：当前完整训练配置使用 `test_freq=-1`、`val_before_train=false`，训练日志中的
@@ -136,17 +138,29 @@
     evaluation 目录均按 RUN_ID 管理。
   - 证据：`docs/EXPERIMENT_MANAGEMENT.md` 和现有 `${OPD_STORAGE_ROOT}/experiments/<RUN_ID>`。
 
-- [ ] **IMP-018（P0）整理并提交当前尚未纳入版本控制的可信 OPD 分析代码。**
+- [x] **IMP-018（P0）整理并提交当前尚未纳入版本控制的可信 OPD 分析代码。**
   - 问题：仓库目前有多项 modified/untracked 的 `configs/trustworthy_opd/` 和
     `scripts/trustworthy_opd/` 文件；正式实验若基于脏工作树，复现和交接会变困难。
   - 改进：逐项确认归属，删除或归档真正无用的临时文件，为保留代码补最小运行说明和快速测试；不要
     覆盖用户已有改动。
   - 验收：相关代码通过编译/短测试并形成范围清晰的 commit；正式运行的 manifest 指向该 commit，必要
     的未提交 diff 为零。
+  - 完成情况：2026-09-07 将可信 OPD 配置、编排、worker、分析和绘图脚本纳入版本控制；增加脚本与
+    配置索引；移除 LlamaFactory、上游示例/recipe/CI/文档、无关数据和旧 hard-min 入口。本条所在整理
+    commit 通过 350 个 Python 文件 AST 检查、全部 Shell 语法检查、24 个 YAML 解析检查、两套 LCB
+    probe dry-run，以及 44 个 OPD/ROPD CPU 测试。
 
 - [ ] **IMP-019（P1）让本清单进入每次正式实验的收尾流程。**
   - 改进：实验结束后检查是否完成某个条目、是否暴露新问题；更新日期、状态、证据目录和新的待办。
   - 验收：下一次正式实验报告或 handoff 明确引用本文件，已完成事项具有 commit/run/result 证据。
+
+- [ ] **IMP-020（P2）消除数学 grader 中的 Python 非法转义告警。**
+  - 发现日期：2026-09-07。
+  - 问题：`scripts/val/eval/utils.py` 和 `verl/utils/reward_score/ttrl_math/` 中的部分正则表达式与
+    LaTeX 字符串没有使用 raw string，Python 3.12 静态解析会产生 `SyntaxWarning`。当前语义通常仍可
+    运行，但未来 Python 版本可能收紧处理。
+  - 验收：改写后在 `PYTHONWARNINGS=error` 下导入相关 grader 无告警；现有及 IMP-001 新增答案解析
+    测试全部通过。
 
 ## 新增条目模板
 

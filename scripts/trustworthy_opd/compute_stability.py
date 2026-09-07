@@ -26,6 +26,7 @@ def candidate_indices(index: int, states: list[dict], config: dict) -> np.ndarra
     anchor = states[index]
     candidates = []
     max_delta = config["neighborhood"].get("max_position_delta")
+    max_normalized_delta = config["neighborhood"].get("max_normalized_position_delta")
     for other_index, other in enumerate(states):
         if other_index == index or other["prompt_index"] != anchor["prompt_index"]:
             continue
@@ -37,6 +38,10 @@ def candidate_indices(index: int, states: list[dict], config: dict) -> np.ndarra
         if max_delta is not None and abs(
             int(other["position"]) - int(anchor["position"])
         ) > int(max_delta):
+            continue
+        if max_normalized_delta is not None and abs(
+            float(other["normalized_position"]) - float(anchor["normalized_position"])
+        ) > float(max_normalized_delta):
             continue
         if other["input_ids"] == anchor["input_ids"]:
             continue

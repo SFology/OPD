@@ -1,0 +1,45 @@
+schema_version: 1
+experiment:
+  name: trustworthy_opd_locality_ablation_existing_24k
+  output_root: "${OPD_STORAGE_ROOT}/trustworthy_opd_locality"
+  seed: 42
+
+# This ablation reuses the validated anchors, features, and task labels. It does
+# not load either language model or mutate the source run.
+source_run: "${OPD_STORAGE_ROOT}/trustworthy_opd/20260812_154919_trustworthy_opd_confirmatory_24k_medium"
+
+representations:
+  - mid_prefix_mean
+  - mid_tail_mean_8
+  - final_last
+
+neighborhoods:
+  # With the current four state fractions, this keeps only states sampled at
+  # the same trajectory progress in another rollout.
+  - name: same_progress
+    max_normalized_position_delta: 0.025
+    knn_k_per_model: 3
+  # This admits the immediately adjacent 0.2-spaced state fraction as a
+  # sensitivity check while remaining much stricter than the original run.
+  - name: adjacent_progress
+    max_normalized_position_delta: 0.21
+    knn_k_per_model: 8
+
+cross_rollout_only: true
+min_neighbors: 2
+top_tail_count: 3
+cvar_quantile: 0.8
+distance_epsilon: 1.0e-4
+
+analysis:
+  unreliable_teacher_threshold: 0.25
+  nonpositive_teacher_advantage_threshold: 0.0
+  bootstrap_samples: 5000
+  bootstrap_metrics:
+    - teacher_max
+    - teacher_abs_max
+    - teacher_slope_abs_max
+    - relative_max
+    - relative_top_mean
+    - relative_abs_excess_max
+    - relative_slope_max

@@ -33,13 +33,38 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Resume collection in an existing pilot run directory.",
     )
+    parser.add_argument(
+        "--rebuild-states-only",
+        action="store_true",
+        help="Reuse existing trajectories and rebuild states without loading a model.",
+    )
+    parser.add_argument(
+        "--valid-only",
+        action="store_true",
+        help="When rebuilding, retain only complete trajectories with parseable answers.",
+    )
+    parser.add_argument("--min-valid-rollouts-per-prompt", type=int)
     return parser.parse_args()
+
+
+def trajectory_is_eligible(trajectory: dict, config: dict) -> bool:
+    return len(trajectory["generated_token_ids"]) < int(
+        config["data"]["max_new_tokens"]
+    ) and trajectory.get("trajectory_predicted_answer") not in (
+        None,
+        "",
+        "[INVALID]",
+    )
 
 
 def build_states(trajectories: list[dict], config: dict) -> list[dict]:
     rows: list[dict] = []
     data_config = config["data"]
     for trajectory in trajectories:
+        if data_config.get("states_from_eligible_trajectories", False) and not (
+            trajectory_is_eligible(trajectory, config)
+        ):
+            continue
         generated = trajectory["generated_token_ids"]
         positions = choose_state_positions(
             len(generated),
@@ -67,6 +92,8 @@ def build_states(trajectories: list[dict], config: dict) -> list[dict]:
 
 def main() -> int:
     args = parse_args()
+    if args.rebuild_states_only and args.run_dir is None:
+        raise ValueError("--rebuild-states-only requires --run-dir")
     config = load_config(args.config)
     run_dir = (
         args.run_dir.resolve() if args.run_dir else create_run_dir(config, args.config)
@@ -74,6 +101,39 @@ def main() -> int:
     if args.run_dir:
         config = load_config(run_dir / "config.yaml")
     print(f"RUN_DIR={run_dir}", flush=True)
+
+    if args.rebuild_states_only:
+        if args.valid_only:
+            config["data"]["states_from_eligible_trajectories"] = True
+            quality = config.setdefault("collection_quality", {})
+            quality["min_parseable_fraction"] = None
+            if args.min_valid_rollouts_per_prompt is not None:
+                quality["min_valid_rollouts_per_prompt"] = (
+                    args.min_valid_rollouts_per_prompt
+                )
+            save_yaml(run_dir / "config.yaml", config)
+        trajectories = read_jsonl(run_dir / "artifacts" / "trajectories.jsonl")
+        if not trajectories:
+            raise RuntimeError("No existing trajectories were found")
+        states = build_states(trajectories, config)
+        write_jsonl(run_dir / "artifacts" / "states.jsonl", states)
+        eligible = sum(trajectory_is_eligible(row, config) for row in trajectories)
+        update_status(
+            run_dir,
+            "collected",
+            trajectories=len(trajectories),
+            eligible_trajectories=eligible,
+            states=len(states),
+            states_from_eligible_trajectories=bool(
+                config["data"].get("states_from_eligible_trajectories", False)
+            ),
+        )
+        print(
+            f"Rebuilt {len(states)} states from {eligible}/{len(trajectories)} "
+            "eligible trajectories",
+            flush=True,
+        )
+        return 0
 
     seed = int(config["experiment"]["seed"])
     set_seed(seed)

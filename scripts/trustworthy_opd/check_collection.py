@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from pathlib import Path
 
 from common import load_run, read_jsonl, update_status
@@ -25,11 +26,17 @@ def main() -> int:
         if args.max_truncated_fraction is not None
         else float(quality.get("max_truncated_fraction", 0.25))
     )
+    configured_parseable = quality.get("min_parseable_fraction", 0.75)
     min_parseable_fraction = (
         args.min_parseable_fraction
         if args.min_parseable_fraction is not None
-        else float(quality.get("min_parseable_fraction", 0.75))
+        else (
+            None
+            if configured_parseable is None
+            else float(configured_parseable)
+        )
     )
+    min_valid_per_prompt = int(quality.get("min_valid_rollouts_per_prompt", 0))
     rows = read_jsonl(run_dir / "artifacts" / "trajectories.jsonl")
     if not rows:
         raise RuntimeError("No collected trajectories were found")
@@ -44,6 +51,19 @@ def main() -> int:
     truncated_fraction = truncated / len(rows)
     parseable_fraction = parseable / len(rows)
     correct_fraction = correct / len(rows)
+    eligible_rows = [
+        row
+        for row in rows
+        if len(row["generated_token_ids"]) < token_limit
+        and row.get("trajectory_predicted_answer") not in (None, "", "[INVALID]")
+    ]
+    valid_per_prompt = Counter(int(row["prompt_index"]) for row in eligible_rows)
+    all_prompts = {int(row["prompt_index"]) for row in rows}
+    deficient_prompts = sorted(
+        prompt
+        for prompt in all_prompts
+        if valid_per_prompt[prompt] < min_valid_per_prompt
+    )
 
     print(f"trajectories={len(rows)}")
     print(f"token_limit={token_limit}")
@@ -51,7 +71,13 @@ def main() -> int:
     print(f"parseable={parseable} ({parseable_fraction:.1%})")
     print(f"correct={correct} ({correct_fraction:.1%})")
     print(f"max_truncated_fraction={max_truncated_fraction:.1%}")
-    print(f"min_parseable_fraction={min_parseable_fraction:.1%}")
+    if min_parseable_fraction is not None:
+        print(f"min_parseable_fraction={min_parseable_fraction:.1%}")
+    else:
+        print("min_parseable_fraction=disabled")
+    print(f"eligible={len(eligible_rows)}")
+    print(f"min_valid_rollouts_per_prompt={min_valid_per_prompt}")
+    print(f"deficient_prompts={len(deficient_prompts)}")
 
     if truncated_fraction > max_truncated_fraction:
         update_status(
@@ -66,7 +92,9 @@ def main() -> int:
         raise RuntimeError(
             "Collection rejected: too many trajectories reached the token limit"
         )
-    if parseable_fraction < min_parseable_fraction:
+    if min_parseable_fraction is not None and (
+        parseable_fraction < min_parseable_fraction
+    ):
         update_status(
             run_dir,
             "collection_rejected",
@@ -79,6 +107,17 @@ def main() -> int:
         raise RuntimeError(
             "Collection rejected: too few trajectories contain parseable final answers"
         )
+    if deficient_prompts:
+        update_status(
+            run_dir,
+            "collection_rejected",
+            rejection_reason="insufficient_valid_rollouts_per_prompt",
+            deficient_prompts=deficient_prompts,
+            min_valid_rollouts_per_prompt=min_valid_per_prompt,
+        )
+        raise RuntimeError(
+            "Collection rejected: some prompts lack enough complete parseable rollouts"
+        )
     update_status(
         run_dir,
         "collection_checked",
@@ -87,6 +126,9 @@ def main() -> int:
         trajectory_correct_fraction=correct_fraction,
         max_truncated_fraction=max_truncated_fraction,
         min_parseable_fraction=min_parseable_fraction,
+        eligible_trajectories=len(eligible_rows),
+        min_valid_rollouts_per_prompt=min_valid_per_prompt,
+        deficient_prompts=len(deficient_prompts),
     )
     return 0
 

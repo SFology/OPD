@@ -1,0 +1,73 @@
+schema_version: 1
+experiment:
+  name: trustworthy_opd_four_group_ppl_stability
+  seed: 42
+  output_root: "${OPD_STORAGE_ROOT}/trustworthy_opd_four_group"
+
+data:
+  parquet: "${OPD_ROOT}/datasets/dapo-math-17k.parquet"
+  prompt_offset: 256
+  prompts_per_round: 64
+  rollouts_per_prompt: 8
+  maximum_rounds: 1
+  max_prompt_tokens: 1024
+  base_max_new_tokens: 24576
+  base_temperature: 1.0
+  base_top_p: 1.0
+  base_attempt_batch_size: 8
+  base_max_attempts_per_prompt: 24
+  min_generated_tokens: 32
+  state_fractions: [0.2, 0.4, 0.6, 0.8]
+
+continuation:
+  student_source: base_trajectory_suffix
+  generated_roles: [teacher]
+  max_new_tokens: 16384
+  temperature: 0.7
+  top_p: 0.95
+
+models:
+  student: "${OPD_MODEL_DIR}/DeepSeek-R1-Distill-Qwen-1.5B"
+  teacher: "${OPD_MODEL_DIR}/JustRL-DeepSeek-1.5B"
+  dtype: bfloat16
+  device: cuda:0
+  attention_implementation: sdpa
+  feature_batch_size: 2
+
+representations:
+  normalize: true
+  definitions:
+    - name: mid_prefix_mean
+      layers: [0.5]
+      pooling: prefix_mean
+    - name: mid_tail_mean_8
+      layers: [0.5]
+      pooling: tail_mean
+      tail_tokens: 8
+    - name: final_last
+      layers: [-1]
+      pooling: last_token
+
+neighborhood:
+  method: dual_rank_knn
+  k: 3
+  minimum_neighbors: 3
+  cross_rollout_only: true
+
+stopping:
+  mode: fixed_rounds
+  fixed_rounds: 1
+
+analysis:
+  primary_representation: mid_prefix_mean
+  bootstrap_samples: 2000
+  confidence_level: 0.95
+
+parallel:
+  logical_shards: 64
+  min_free_mb: 30000
+  max_utilization: 15
+  gpu_stability_seconds: 10
+  gpu_poll_seconds: 60
+  gpu_wait_seconds: 86400
+  max_gpus: null

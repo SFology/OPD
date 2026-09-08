@@ -24,6 +24,7 @@ import uuid
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from pprint import pprint
 from typing import Optional
 
@@ -50,6 +51,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.robust_opd import DenseDiscreteROPDEngine, append_ropd_diagnostics
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -59,6 +61,17 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+
+
+def _json_default(value):
+    """Convert tensor and NumPy values emitted by reward functions to JSON types."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
 @dataclass
@@ -352,6 +365,7 @@ class RayPPOTrainer:
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
+        self._dense_ropd_engine = None
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
@@ -457,7 +471,7 @@ class RayPPOTrainer:
         lines = []
         for i in range(n):
             entry = {k: v[i] for k, v in base_data.items()}
-            lines.append(json.dumps(entry, ensure_ascii=False))
+            lines.append(json.dumps(entry, ensure_ascii=False, default=_json_default))
 
         with open(filename, "w") as f:
             f.write("\n".join(lines) + "\n")
@@ -1105,15 +1119,6 @@ class RayPPOTrainer:
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            with marked_timer("compute_log_prob", timing_raw, color="blue"):
-                                # First forward, get student top k ids and log probs
-                                print("First forward, get student top k ids and log probs")
-                                old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-
-                                # if "entropys" in old_log_prob.batch.keys():
-                                #    old_log_prob.batch.pop("entropys")
-                                batch = batch.union(old_log_prob)
-
                             # Get Top-K parameters from config
                             top_k = self.config.actor_rollout_ref.rollout.get("log_prob_top_k", 0)
                             strategy = self.config.actor_rollout_ref.rollout.get("top_k_strategy", "only_stu")
@@ -1130,7 +1135,48 @@ class RayPPOTrainer:
                             batch.meta_info["kl_estimator"] = kl_estimator
                             batch.meta_info["reward_weight_mode"] = reward_weight_mode
                             batch.meta_info["teacher_temperature"] = teacher_temperature
-                            
+                            robust_opd_config = self.config.actor_rollout_ref.rollout.get("robust_opd", {}) or {}
+                            if OmegaConf.is_config(robust_opd_config):
+                                robust_opd_config = OmegaConf.to_container(robust_opd_config, resolve=True)
+                            robust_opd_config = dict(robust_opd_config)
+                            batch.meta_info["robust_opd"] = robust_opd_config
+
+                            robust_support = None
+                            if robust_opd_config.get("enabled", False):
+                                if top_k <= 0:
+                                    raise ValueError("Dense discrete ROPD requires log_prob_top_k > 0")
+                                if strategy != "only_stu":
+                                    raise ValueError("Dense discrete ROPD requires top_k_strategy='only_stu'")
+                                if self.config.actor_rollout_ref.rollout.n < 2:
+                                    raise ValueError("Dense discrete ROPD requires at least two rollouts per prompt")
+                                run_dir = Path(str(self.config.trainer.default_local_dir)).resolve().parent
+                                if self._dense_ropd_engine is None:
+                                    embedding_cache = robust_opd_config.get("embedding_cache_dir")
+                                    embedding_cache = embedding_cache or run_dir / "cache" / "robust_opd_embeddings"
+                                    self._dense_ropd_engine = DenseDiscreteROPDEngine(
+                                        config=robust_opd_config,
+                                        actor_model_path=self.config.actor_rollout_ref.model.path,
+                                        teacher_model_path=self.config.reward_model.model.path,
+                                        cache_root=embedding_cache,
+                                    )
+                                if robust_opd_config.get("aggregation", "hard_min") == "lcb_gate":
+                                    with marked_timer("prepare_robust_opd_support", timing_raw, color="red"):
+                                        robust_support = self._dense_ropd_engine.prepare_sampled_action_requests(batch)
+                                    request_device = batch.batch["responses"].device
+                                    batch.batch["ropd_sparse_positions"] = robust_support.request_positions.to(
+                                        request_device
+                                    )
+                                    batch.batch["ropd_sparse_action_ids"] = robust_support.request_action_ids.to(
+                                        request_device
+                                    )
+                                    batch.batch["ropd_sparse_valid"] = robust_support.request_valid.to(request_device)
+
+                            with marked_timer("compute_log_prob", timing_raw, color="blue"):
+                                # The sparse exact-action requests, when present, are scored in this same forward.
+                                print("First forward, get student top k ids and log probs")
+                                old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                                batch = batch.union(old_log_prob)
+
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
                                 teacher_data = self.rm_wg.compute_rm_score(batch)
                                 batch = batch.union(teacher_data)
@@ -1142,6 +1188,35 @@ class RayPPOTrainer:
                                 with marked_timer("compute_distillation_reward", timing_raw, color="orange"):
                                     distillation_output = self.actor_rollout_wg.compute_distillation_reward(batch)
                                     batch = batch.union(distillation_output)
+
+                                if robust_opd_config.get("enabled", False):
+                                    with marked_timer("compute_robust_opd", timing_raw, color="red"):
+                                        robust_result = self._dense_ropd_engine.compute(
+                                            batch, self.global_steps, support=robust_support
+                                        )
+                                    apply_to_training = bool(robust_opd_config.get("apply_to_training", False))
+                                    metrics.update(robust_result.metrics)
+                                    metrics["ropd/applied_to_training"] = float(apply_to_training)
+                                    append_ropd_diagnostics(
+                                        run_dir=run_dir,
+                                        step=self.global_steps,
+                                        metrics=robust_result.metrics,
+                                        samples=robust_result.samples,
+                                        apply_to_training=apply_to_training,
+                                    )
+                                    if apply_to_training:
+                                        rm_scores = batch.batch["rm_scores"]
+                                        batch.batch["rm_scores"] = robust_result.ropd_scores.to(
+                                            device=rm_scores.device, dtype=rm_scores.dtype
+                                        )
+                                    batch.batch.pop("opd_raw_rewards", None)
+                                    batch.batch.pop("opd_reward_weights", None)
+                                    batch.batch.pop("ropd_sparse_positions", None)
+                                    batch.batch.pop("ropd_sparse_action_ids", None)
+                                    batch.batch.pop("ropd_sparse_valid", None)
+                                    batch.batch.pop("student_neighbor_request_log_probs", None)
+                                    batch.batch.pop("teacher_neighbor_request_log_probs", None)
+                                    batch.batch.pop("teacher_sampled_token_log_probs", None)
                         
                         # Plot overlapping tokens for Reverse KL
                         if (self.global_steps == 1 or self.global_steps % 10 == 0) and "student_valid_counts" in batch.batch.keys():

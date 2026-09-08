@@ -21,7 +21,6 @@ from typing import Any
 
 import yaml
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -155,13 +154,30 @@ def hvalue(value: Any) -> str:
         return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (list, dict)):
+    if isinstance(value, list):
         return json.dumps(value, separators=(",", ":"))
+    if isinstance(value, dict):
+        # Hydra accepts YAML-style flow mappings, but JSON's quoted mapping
+        # keys fail its override grammar (for example {"enabled":true}).
+        return yaml.safe_dump(
+            value,
+            default_flow_style=True,
+            sort_keys=False,
+            width=1_000_000,
+        ).strip()
     return str(value)
 
 
 def override(key: str, value: Any, add: bool = False) -> str:
     return f"{'+' if add else ''}{key}={hvalue(value)}"
+
+
+def validate_hydra_overrides(command: list[str]) -> None:
+    """Parse every generated override with Hydra before creating a run."""
+
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
+    OverridesParser.create().parse_overrides(overrides=command[3:])
 
 
 def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[str]:
@@ -178,7 +194,9 @@ def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[s
         data["max_prompt_length"] + data["max_response_length"],
         data["max_prompt_length"] + data["max_val_response_length"],
     )
-    max_tokens_per_gpu = max(data["max_prompt_length"] + data["max_response_length"], 32768)
+    max_tokens_per_gpu = optim.get("max_tokens_per_gpu") or max(
+        data["max_prompt_length"] + data["max_response_length"], 32768
+    )
     global_batch = optim["mini_batch_size"] * rollout["sequence_parallel_size"]
     rollout_dir = str(run_dir / "rollouts") if logging["dump_rollouts"] else None
 
@@ -239,7 +257,7 @@ def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[s
         ("reward_model.model.path", models["teacher_path"], False),
         ("reward_model.model.input_tokenizer", None, False),
         ("reward_model.model.use_remove_padding", True, False),
-        ("reward_model.model.fsdp_config.param_offload", False, False),
+        ("reward_model.model.fsdp_config.param_offload", reward["param_offload"], False),
         ("reward_model.model.dtype", models["dtype"], True),
         ("reward_model.micro_batch_size_per_gpu", reward["micro_batch_size_per_gpu"], False),
         ("custom_reward_function.path", str(REPO_ROOT / "verl/verl/utils/reward_score/ttrl_math/__init__.py"), False),
@@ -271,6 +289,8 @@ def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[s
                 ("actor_rollout_ref.actor.kl_loss_type", distill["kl_loss_type"], False),
             ]
         )
+    if distill.get("robust_opd") is not None:
+        values.append(("actor_rollout_ref.rollout.robust_opd", distill["robust_opd"], True))
     if optim["lr_scheduler"] == "cosine":
         values.extend(
             [
@@ -283,19 +303,83 @@ def build_command(config: dict[str, Any], run_dir: Path, resume: bool) -> list[s
 
 def managed_environment(config: dict[str, Any], run_dir: Path) -> dict[str, str]:
     runtime = config["runtime"]
-    return {
+    ray_tmpdir = Path(runtime.get("ray_tmpdir", "/tmp/lfk-ray"))
+    result = {
         "CUDA_LAUNCH_BLOCKING": "1" if runtime["cuda_launch_blocking"] else "0",
         "HYDRA_FULL_ERROR": "1",
         "NCCL_DEBUG": str(runtime["nccl_debug"]),
         "NCCL_TIMEOUT": str(runtime["nccl_timeout"]),
         "OUTLINES_CACHE_DIR": str(run_dir / "cache" / "outlines"),
         "PYTHONUNBUFFERED": "1",
+        "RAY_TMPDIR": str(ray_tmpdir),
         "SWANLAB_LOG_DIR": str(run_dir / "swanlab"),
         "SWANLAB_MODE": str(config["logging"]["swanlab_mode"]),
         "TOKENIZERS_PARALLELISM": "true",
         "TORCH_DISTRIBUTED_DEBUG": str(runtime["torch_distributed_debug"]),
         "TORCH_NCCL_BLOCKING_WAIT": "1",
     }
+    if runtime.get("cuda_visible_devices") is not None:
+        result["CUDA_VISIBLE_DEVICES"] = str(runtime["cuda_visible_devices"])
+    for compiler_var in ("CC", "CXX"):
+        if os.environ.get(compiler_var):
+            result[compiler_var] = os.environ[compiler_var]
+    return result
+
+
+def prepare_ray_tmpdir(config: dict[str, Any]) -> Path:
+    """Create Ray's short socket path, optionally backed by large storage."""
+    runtime = config["runtime"]
+    ray_tmpdir = Path(runtime.get("ray_tmpdir", "/tmp/lfk-ray"))
+    backing_value = runtime.get("ray_tmpdir_backing")
+    if backing_value is None:
+        ray_tmpdir.mkdir(parents=True, exist_ok=True)
+        return ray_tmpdir
+
+    backing = Path(backing_value)
+    backing.mkdir(parents=True, exist_ok=True)
+    if ray_tmpdir.is_symlink():
+        if ray_tmpdir.resolve() != backing.resolve():
+            raise RuntimeError(
+                f"runtime.ray_tmpdir points to {ray_tmpdir.resolve()}, expected backing directory {backing.resolve()}"
+            )
+        return ray_tmpdir
+    if ray_tmpdir.exists():
+        raise RuntimeError(
+            f"runtime.ray_tmpdir must be absent or a symlink when ray_tmpdir_backing is set: {ray_tmpdir}"
+        )
+    ray_tmpdir.parent.mkdir(parents=True, exist_ok=True)
+    ray_tmpdir.symlink_to(backing, target_is_directory=True)
+    return ray_tmpdir
+
+
+def gpu_preflight(config: dict[str, Any]) -> None:
+    runtime = config["runtime"]
+    threshold = runtime.get("min_free_gpu_memory_mb")
+    visible = runtime.get("cuda_visible_devices")
+    if threshold is None or visible is None:
+        return
+    requested = [int(item.strip()) for item in str(visible).split(",") if item.strip()]
+    output = run_capture(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,memory.free,memory.total,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ]
+    )
+    records: dict[int, tuple[int, int, int]] = {}
+    for line in output.splitlines():
+        fields = [int(field.strip()) for field in line.split(",")]
+        if len(fields) == 4:
+            records[fields[0]] = (fields[1], fields[2], fields[3])
+    for index in requested:
+        if index not in records:
+            raise RuntimeError(f"GPU {index} is not visible to nvidia-smi")
+        free_mb, total_mb, utilization = records[index]
+        print(f"GPU_PREFLIGHT index={index} free={free_mb}MiB total={total_mb}MiB utilization={utilization}%")
+        if free_mb < int(threshold):
+            raise RuntimeError(
+                f"GPU {index} has {free_mb} MiB free, below the configured {threshold} MiB safety threshold"
+            )
 
 
 def render_command_script(command: list[str], config: dict[str, Any], run_dir: Path) -> str:
@@ -323,6 +407,25 @@ def validate(config: dict[str, Any]) -> None:
             raise FileNotFoundError(f"model not found or incomplete: {path}")
     if config["trainer"]["n_gpus_per_node"] < 1:
         raise ValueError("trainer.n_gpus_per_node must be positive")
+    ray_tmpdir = Path(config["runtime"].get("ray_tmpdir", "/tmp/lfk-ray"))
+    if not ray_tmpdir.is_absolute():
+        raise ValueError("runtime.ray_tmpdir must be an absolute path")
+    ray_tmpdir_backing = config["runtime"].get("ray_tmpdir_backing")
+    if ray_tmpdir_backing is not None and not Path(ray_tmpdir_backing).is_absolute():
+        raise ValueError("runtime.ray_tmpdir_backing must be an absolute path")
+    socket_probe = ray_tmpdir / "ray" / "session_2000-01-01_00-00-00_000000_99999999" / "sockets" / "plasma_store"
+    if len(os.fsencode(socket_probe)) > 107:
+        raise ValueError(
+            f"runtime.ray_tmpdir is too long for Ray AF_UNIX sockets: {ray_tmpdir}"
+        )
+    robust_opd = config["distillation"].get("robust_opd")
+    if robust_opd and robust_opd.get("enabled", False):
+        if config["distillation"]["log_prob_top_k"] <= 0:
+            raise ValueError("dense discrete ROPD requires distillation.log_prob_top_k > 0")
+        if config["distillation"]["top_k_strategy"] != "only_stu":
+            raise ValueError("dense discrete ROPD requires distillation.top_k_strategy=only_stu")
+        if config["rollout"]["n"] < 2:
+            raise ValueError("dense discrete ROPD requires rollout.n >= 2")
 
 
 def write_yaml(path: Path, value: Any) -> None:
@@ -334,7 +437,17 @@ def write_yaml(path: Path, value: Any) -> None:
 def prepare_run(
     config: dict[str, Any], source_config: Path, run_dir: Path, git: dict[str, Any], command: list[str], resume: bool
 ) -> None:
-    for name in ["checkpoints", "environment", "evaluation", "hydra", "logs", "rollouts", "swanlab", "validation"]:
+    for name in [
+        "checkpoints",
+        "environment",
+        "evaluation",
+        "hydra",
+        "logs",
+        "metrics",
+        "rollouts",
+        "swanlab",
+        "validation",
+    ]:
         (run_dir / name).mkdir(parents=True, exist_ok=True)
     write_yaml(run_dir / "config.yaml", config)
     config_digest = hashlib.sha256((run_dir / "config.yaml").read_bytes()).hexdigest()
@@ -381,8 +494,13 @@ def launch(command: list[str], run_dir: Path, config: dict[str, Any]) -> int:
     env = os.environ.copy()
     env.update(managed_environment(config, run_dir))
     env.pop("RAY_ADDRESS", None)
+    prepare_ray_tmpdir(config)
     (run_dir / "cache" / "outlines").mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "logs" / "train.log"
+    # Environment capture can take several minutes. Recheck immediately before
+    # spawning Ray so a GPU claimed after the initial preflight cannot cause a
+    # misleading vLLM KV-cache initialization failure.
+    gpu_preflight(config)
     update_status(run_dir, "running", started_at_utc=utc_now(), pid=os.getpid())
     with log_path.open("a", encoding="utf-8", buffering=1) as log:
         header = f"Run: {run_dir.name}\nCommand: {shlex.join(command)}\n"
@@ -445,11 +563,14 @@ def main() -> int:
             raise FileExistsError(f"run already exists: {run_dir}")
 
     command = build_command(config, run_dir, resume)
+    validate_hydra_overrides(command)
     print(f"RUN_ID={run_dir.name}")
     print(f"RUN_DIR={run_dir}")
     print(f"COMMAND={shlex.join(command)}")
     if args.dry_run:
         return 0
+
+    gpu_preflight(config)
 
     if not resume:
         run_dir.mkdir(parents=True)

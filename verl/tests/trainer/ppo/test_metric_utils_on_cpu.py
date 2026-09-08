@@ -102,11 +102,22 @@ class TestComputeDataMetrics(unittest.TestCase):
         # Check that all expected metrics are present
         self.assertIn("critic/score/mean", metrics)
         self.assertIn("critic/rewards/mean", metrics)
+        self.assertNotIn("critic/true_reward/mean", metrics)
         self.assertIn("critic/advantages/mean", metrics)
         self.assertIn("critic/returns/mean", metrics)
         self.assertIn("critic/values/mean", metrics)
         self.assertIn("critic/vf_explained_var", metrics)
         self.assertIn("response_length/mean", metrics)
+
+    def test_compute_data_metrics_with_true_reward(self):
+        """Verifier correctness metrics are emitted only when provided."""
+        self.batch.batch["true_reward_score"] = torch.tensor([[0.0, 1.0], [0.0, 0.0]])
+
+        metrics = compute_data_metrics(self.batch, use_critic=False)
+
+        self.assertAlmostEqual(metrics["critic/true_reward/mean"], 0.5)
+        self.assertAlmostEqual(metrics["critic/true_reward/max"], 1.0)
+        self.assertAlmostEqual(metrics["critic/true_reward/min"], 0.0)
         self.assertIn("prompt_length/mean", metrics)
 
         # Check some specific values

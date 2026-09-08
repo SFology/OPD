@@ -1,0 +1,36 @@
+extends: opd_default.yaml
+
+experiment:
+  name: opd_rtx6000_baseline
+  description: OPD reproduction baseline adapted consistently for 8x RTX 6000 Ada 48GB.
+  tags: [opd, reproduction, baseline, rtx6000-ada, 8gpu]
+
+# Keep the original models, dataset, batch size, rollout count, sequence lengths,
+# top-k recipe, learning rate, and one-epoch schedule. Only memory/runtime policy
+# differs from the A800 FP32 reference configuration.
+models:
+  dtype: bfloat16
+
+optimization:
+  param_offload: false
+  optimizer_offload: false
+
+rollout:
+  gpu_memory_utilization: 0.55
+
+reward_model:
+  param_offload: true
+
+trainer:
+  is_plot: false
+
+logging:
+  swanlab_mode: local
+  dump_rollouts: false
+
+runtime:
+  cuda_visible_devices: "0,1,2,3,4,5,6,7"
+  # The server scheduler permits safe GPU sharing, so do not reject a run based
+  # on the instantaneous free-memory value reported by nvidia-smi.
+  min_free_gpu_memory_mb: null
+  cuda_launch_blocking: false

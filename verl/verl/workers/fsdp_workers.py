@@ -80,6 +80,10 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
+from verl.utils.sparse_log_probs import (
+    gather_sparse_packed_response_log_probs,
+    gather_sparse_response_log_probs,
+)
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import compute_position_id_with_mask, convert_weight_keys
@@ -982,7 +986,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             with adapter_ctx:
-                output, entropys, topk_ids, topk_log_probs = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                output, entropys, topk_ids, topk_log_probs, sparse_log_probs = self.actor.compute_log_prob(
+                    data=data, calculate_entropy=True
+                )
             
             tensors = {"old_log_probs": output, "entropys": entropys}
             if topk_ids is not None:
@@ -990,6 +996,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if topk_log_probs is not None:
                 tensors["student_top_k_log_probs"] = topk_log_probs
                 tensors["student_valid_counts"] = (topk_log_probs > -1e6).sum(dim=-1)
+            if sparse_log_probs is not None:
+                tensors["student_neighbor_request_log_probs"] = sparse_log_probs
             
             output = DataProto.from_dict(
                 tensors=tensors,
@@ -1922,7 +1930,15 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         import_external_libs(self.config.model.get("external_lib", None))
         self.reward_module = self._build_model(config=self.config)
 
-    def _forward_micro_batch(self, micro_batch, student_top_k_ids=None, compute_entropy=False, top_k=0, strategy="only_stu", teacher_temperature=1.0):
+    def _forward_micro_batch(
+        self,
+        micro_batch,
+        student_top_k_ids=None,
+        compute_entropy=False,
+        top_k=0,
+        strategy="only_stu",
+        teacher_temperature=1.0,
+    ):
         from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
         from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs, ulysses_pad
         import verl.utils.torch_functional as verl_F
@@ -1942,7 +1958,16 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             teacher_valid_counts = None
             teacher_overlap_mask = None
             teacher_in_student_mask = None  # For union strategy: T_in_S computed in chunks
-            need_logits = student_top_k_ids is not None or compute_entropy
+            sparse_log_probs = None
+            sparse_positions = micro_batch.get("ropd_sparse_positions")
+            sparse_action_ids = micro_batch.get("ropd_sparse_action_ids")
+            sparse_valid = micro_batch.get("ropd_sparse_valid")
+            sparse_requested = sparse_positions is not None
+            if sparse_requested and (sparse_action_ids is None or sparse_valid is None):
+                raise ValueError("Sparse ROPD positions, action ids, and validity mask must be provided together")
+            if sparse_requested and self.use_ulysses_sp:
+                raise ValueError("Sparse exact-action ROPD currently requires ulysses_sequence_parallel_size=1")
+            need_logits = student_top_k_ids is not None or compute_entropy or sparse_requested
 
             if self.use_remove_padding:
                 input_ids_rmpad, indices, *_ = unpad_input(
@@ -2013,6 +2038,17 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     logits_rmpad = output[0] if isinstance(output, tuple) else output.logits
                     logits_rmpad = logits_rmpad.squeeze(0)  # (total_nnz, vocab_size)
                     logits_rmpad = logits_rmpad.div_(teacher_temperature)
+
+                    if sparse_requested:
+                        sparse_log_probs = gather_sparse_packed_response_log_probs(
+                            logits_rmpad,
+                            indices,
+                            sequence_length=seqlen,
+                            response_length=response_length,
+                            positions=sparse_positions,
+                            action_ids=sparse_action_ids,
+                            valid=sparse_valid,
+                        )
 
                     # Compute entropy if logits are available
                     # We compute entropy on the logits.
@@ -2247,6 +2283,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     rm_output_logits = output[0] if isinstance(output, tuple) else output.logits
                     rm_logits_resp = rm_output_logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     rm_logits_resp = rm_logits_resp.div_(teacher_temperature)
+
+                    if sparse_requested:
+                        sparse_log_probs = gather_sparse_response_log_probs(
+                            rm_logits_resp, sparse_positions, sparse_action_ids, sparse_valid
+                        )
                     
                     # Compute entropy
                     if compute_entropy:
@@ -2287,7 +2328,17 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                             teacher_on_student_log_probs = teacher_on_student_log_probs - teacher_logsumexp
                             teacher_overlap_mask = None
 
-            return rm_log_probs, teacher_on_student_log_probs, teacher_top_k_ids, teacher_top_k_log_probs, teacher_entropy, teacher_valid_counts, teacher_overlap_mask, teacher_in_student_mask
+            return (
+                rm_log_probs,
+                teacher_on_student_log_probs,
+                teacher_top_k_ids,
+                teacher_top_k_log_probs,
+                teacher_entropy,
+                teacher_valid_counts,
+                teacher_overlap_mask,
+                teacher_in_student_mask,
+                sparse_log_probs,
+            )
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
         batch_size = data.batch.batch_size[0]
@@ -2564,10 +2615,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         student_logp = data.batch["old_log_probs"]  # shape: [batch, response_len]
         
         student_top_k_ids = None
-        student_top_k_log_probs = None
         if "student_top_k_ids" in data.batch.keys():
-             student_top_k_ids = data.batch["student_top_k_ids"]
-             student_top_k_log_probs = data.batch["student_top_k_log_probs"]
+            student_top_k_ids = data.batch["student_top_k_ids"]
+        sparse_keys = ["ropd_sparse_positions", "ropd_sparse_action_ids", "ropd_sparse_valid"]
+        if any(key in data.batch for key in sparse_keys) and not all(key in data.batch for key in sparse_keys):
+            raise ValueError("Incomplete sparse ROPD request tensors")
         
         # Get global_steps from meta_info
         global_steps = data.meta_info.get("global_steps", -1)
@@ -2597,6 +2649,9 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         
         if student_top_k_ids is not None:
              rm_data.batch["student_top_k_ids"] = student_top_k_ids
+        for key in sparse_keys:
+            if key in data.batch:
+                rm_data.batch[key] = data.batch[key]
 
         # perform forward computation
         with self.ulysses_sharding_manager:
@@ -2620,6 +2675,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             output_valid_counts = []
             output_overlap_counts = []
             output_teacher_in_student = []  # For union strategy: T_in_S computed in chunks
+            output_sparse_log_probs = []
             
             for micro_batch in micro_batches:
                 # micro_batch is a DataProto or DataProtoItem.
@@ -2636,7 +2692,17 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     # Fallback for other types (e.g. dict) if split behaves differently
                     mb_top_k_ids = micro_batch.get("student_top_k_ids", None) if hasattr(micro_batch, "get") else None
 
-                teacher_logp_batch, teacher_on_student_logp_batch, teacher_top_k_ids_batch, teacher_top_k_logp_teacher_batch, teacher_entropy_batch, teacher_valid_counts_batch, teacher_overlap_mask_batch, teacher_in_student_mask_batch = self._forward_micro_batch(
+                (
+                    teacher_logp_batch,
+                    teacher_on_student_logp_batch,
+                    teacher_top_k_ids_batch,
+                    teacher_top_k_logp_teacher_batch,
+                    teacher_entropy_batch,
+                    teacher_valid_counts_batch,
+                    teacher_overlap_mask_batch,
+                    teacher_in_student_mask_batch,
+                    sparse_log_probs_batch,
+                ) = self._forward_micro_batch(
                     micro_batch, 
                     student_top_k_ids=mb_top_k_ids,
                     compute_entropy=compute_entropy,
@@ -2659,6 +2725,8 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     output_overlap_counts.append(teacher_overlap_mask_batch)
                 if teacher_in_student_mask_batch is not None:
                     output_teacher_in_student.append(teacher_in_student_mask_batch)
+                if sparse_log_probs_batch is not None:
+                    output_sparse_log_probs.append(sparse_log_probs_batch)
                     
             teacher_logp = torch.cat(output_logp, dim=0)
             teacher_on_student_logp = None
@@ -2689,6 +2757,10 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             if len(output_teacher_in_student) > 0:
                 teacher_in_student_mask = torch.cat(output_teacher_in_student, dim=0)
 
+            teacher_neighbor_request_log_probs = None
+            if output_sparse_log_probs:
+                teacher_neighbor_request_log_probs = torch.cat(output_sparse_log_probs, dim=0)
+
             if use_dynamic_bsz:
                 indices = list(itertools.chain.from_iterable(indices))
                 assert len(indices) == teacher_logp.size(0), f"{len(indices)} vs. {teacher_logp.size(0)}"
@@ -2708,6 +2780,8 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     teacher_overlap_mask = teacher_overlap_mask[revert_indices]
                 if teacher_in_student_mask is not None:
                     teacher_in_student_mask = teacher_in_student_mask[revert_indices]
+                if teacher_neighbor_request_log_probs is not None:
+                    teacher_neighbor_request_log_probs = teacher_neighbor_request_log_probs[revert_indices]
 
             if top_k > 0:
                 # Reward calculation is moved to ray_trainer for top_k > 0
@@ -2729,6 +2803,10 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             
             if teacher_on_student_logp is not None:
                 tensors["teacher_on_student_log_probs"] = teacher_on_student_logp
+
+            if teacher_neighbor_request_log_probs is not None:
+                tensors["teacher_sampled_token_log_probs"] = teacher_logp
+                tensors["teacher_neighbor_request_log_probs"] = teacher_neighbor_request_log_probs
 
             if teacher_top_k_ids is not None:
                 tensors["teacher_top_k_ids"] = teacher_top_k_ids

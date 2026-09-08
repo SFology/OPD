@@ -1,0 +1,37 @@
+extends: opd_rtx6000_baseline.yaml
+
+experiment:
+  name: opd_completion_first_4gpu
+  description: Completion-first full-epoch OPD reproduction on 4x RTX 6000 Ada.
+  tags: [opd, reproduction, completion-first, rtx6000-ada, 4gpu]
+
+# Preserve the original dataset, global batch, rollout count, 7168-token horizon,
+# Top-16 OPD objective, learning rate, and one-epoch schedule. These settings
+# change only numerical precision and memory/runtime policy.
+optimization:
+  max_tokens_per_gpu: 8192
+  param_offload: true
+  optimizer_offload: true
+
+rollout:
+  gpu_memory_utilization: 0.35
+
+reward_model:
+  micro_batch_size_per_gpu: 1
+  param_offload: true
+
+trainer:
+  n_gpus_per_node: 4
+  save_freq: 10
+  max_actor_ckpt_to_keep: 3
+  is_plot: false
+
+logging:
+  swanlab_mode: local
+  dump_rollouts: false
+
+runtime:
+  # The tmux launcher selects a stable set at runtime and supplies this field.
+  cuda_visible_devices: null
+  min_free_gpu_memory_mb: null
+  cuda_launch_blocking: false

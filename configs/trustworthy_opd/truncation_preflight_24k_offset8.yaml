@@ -1,0 +1,28 @@
+schema_version: 1
+
+experiment:
+  name: trustworthy_opd_truncation_preflight_24k_offset8
+  seed: 42
+  output_root: "${OPD_STORAGE_ROOT}/trustworthy_opd"
+
+data:
+  parquet: "${OPD_ROOT}/datasets/dapo-math-17k.parquet"
+  num_prompts: 8
+  prompt_offset: 8
+  rollouts_per_prompt: 4
+  max_prompt_tokens: 1024
+  max_new_tokens: 24576
+  temperature: 1.0
+  top_p: 1.0
+  state_fractions: [0.2, 0.4, 0.6, 0.8]
+  min_generated_tokens: 16
+
+models:
+  student: "${OPD_MODEL_DIR}/DeepSeek-R1-Distill-Qwen-1.5B"
+  dtype: bfloat16
+  device: cuda:0
+  attention_implementation: sdpa
+
+collection_quality:
+  max_truncated_fraction: 0.15
+  min_parseable_fraction: 0.80

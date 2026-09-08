@@ -103,7 +103,11 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
-    sequence_true_reward = batch.batch["true_reward_score"].sum(-1)
+    sequence_true_reward = (
+        batch.batch["true_reward_score"].sum(-1)
+        if "true_reward_score" in batch.batch
+        else None
+    )
 
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
@@ -124,7 +128,6 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
 
     non_aborted_sequence_score = sequence_score[non_aborted_mask]
     non_aborted_sequence_reward = sequence_reward[non_aborted_mask]
-    non_aborted_sequence_true_reward = sequence_true_reward[non_aborted_mask]
 
     score_mean = torch.mean(non_aborted_sequence_score).detach().item()
     score_max = torch.max(non_aborted_sequence_score).detach().item()
@@ -134,9 +137,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     reward_max = torch.max(non_aborted_sequence_reward).detach().item()
     reward_min = torch.min(non_aborted_sequence_reward).detach().item()
 
-    true_reward_mean = torch.mean(non_aborted_sequence_true_reward).detach().item()
-    true_reward_max = torch.max(non_aborted_sequence_true_reward).detach().item()
-    true_reward_min = torch.min(non_aborted_sequence_true_reward).detach().item()
+    true_reward_metrics: dict[str, float] = {}
+    if sequence_true_reward is not None:
+        non_aborted_sequence_true_reward = sequence_true_reward[non_aborted_mask]
+        true_reward_metrics = {
+            "critic/true_reward/mean": torch.mean(non_aborted_sequence_true_reward).detach().item(),
+            "critic/true_reward/max": torch.max(non_aborted_sequence_true_reward).detach().item(),
+            "critic/true_reward/min": torch.min(non_aborted_sequence_true_reward).detach().item(),
+        }
 
 
     # Handle 2D and 3D advantages/returns with different strategies:
@@ -268,10 +276,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/rewards/mean": reward_mean,
         "critic/rewards/max": reward_max,
         "critic/rewards/min": reward_min,
-        # true reward
-        "critic/true_reward/mean": true_reward_mean,
-        "critic/true_reward/max": true_reward_max,
-        "critic/true_reward/min": true_reward_min,
+        # Optional verifier correctness, separate from the training reward.
+        **true_reward_metrics,
         # adv: max/min on all values; two mean values for 3D case
         "critic/advantages/max": torch.max(valid_adv_all).detach().item() if valid_adv_all.numel() > 0 else 0.0,
         "critic/advantages/min": torch.min(valid_adv_all).detach().item() if valid_adv_all.numel() > 0 else 0.0,

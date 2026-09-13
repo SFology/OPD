@@ -1,0 +1,11 @@
+extends: opd_update_matched_seed43_base.yaml
+
+experiment:
+  name: opd_update_matched_seed43_ropd
+  description: Raw sign-preserving LCB ROPD treatment.
+  tags: [ropd, update-matched, seed43, treatment]
+
+distillation:
+  robust_opd:
+    training_reward_mode: ropd
+    apply_to_training: true

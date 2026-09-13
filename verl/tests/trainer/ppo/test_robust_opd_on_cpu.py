@@ -27,6 +27,8 @@ from verl.trainer.ppo.robust_opd import (
     compute_dense_discrete_ropd,
     load_projected_embedding_table,
     prepare_dense_discrete_lcb_support,
+    resolve_training_reward_mode,
+    select_training_rewards,
     validate_dense_discrete_config,
 )
 from verl.utils.sparse_log_probs import (
@@ -367,3 +369,38 @@ def test_lcb_no_neighbor_falls_back_to_original_opd() -> None:
 
     torch.testing.assert_close(result.ropd_scores, raw_opd * weights)
     assert result.metrics["ropd/trust_mean"] == pytest.approx(1.0)
+
+
+def test_training_reward_modes_separate_gating_from_global_scale() -> None:
+    opd = torch.tensor([[[2.0, -1.0], [1.0, 1.0]]])
+    ropd = torch.tensor([[[0.5, -0.25], [0.25, 0.25]]])
+    mask = torch.ones(1, 2, dtype=torch.bool)
+
+    scaled, scaled_metrics = select_training_rewards(
+        opd_scores=opd,
+        ropd_scores=ropd,
+        response_mask=mask,
+        config={"training_reward_mode": "scaled_opd", "apply_to_training": True, "fixed_opd_scale": 0.2},
+    )
+    torch.testing.assert_close(scaled, opd * 0.2)
+    assert scaled_metrics["ropd/training_reward_scale"] == pytest.approx(0.2)
+
+    normalized, normalized_metrics = select_training_rewards(
+        opd_scores=opd,
+        ropd_scores=ropd,
+        response_mask=mask,
+        config={"training_reward_mode": "normalized_ropd", "apply_to_training": True},
+    )
+    opd_token_rms = torch.sqrt(torch.mean(opd.sum(dim=-1).square()))
+    normalized_token_rms = torch.sqrt(torch.mean(normalized.sum(dim=-1).square()))
+    torch.testing.assert_close(normalized_token_rms, opd_token_rms)
+    assert normalized_metrics["ropd/training_reward_scale"] == pytest.approx(4.0)
+
+
+def test_training_reward_mode_preserves_legacy_apply_flag_and_rejects_conflict() -> None:
+    assert resolve_training_reward_mode({"apply_to_training": False}) == "opd"
+    assert resolve_training_reward_mode({"apply_to_training": True}) == "ropd"
+    with pytest.raises(ValueError, match="conflicts"):
+        resolve_training_reward_mode(
+            {"training_reward_mode": "normalized_ropd", "apply_to_training": False}
+        )

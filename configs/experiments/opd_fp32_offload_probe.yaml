@@ -1,0 +1,11 @@
+extends: opd_fp32_offload.yaml
+
+experiment:
+  name: opd_fp32_offload_probe
+  description: One-step full-shape FP32/offload OPD resource and update probe.
+  tags: [opd, reproduction, fp32, offload, probe, rtx6000-ada, auto-gpu]
+
+trainer:
+  total_training_steps: 1
+  save_freq: 1
+  max_actor_ckpt_to_keep: 1

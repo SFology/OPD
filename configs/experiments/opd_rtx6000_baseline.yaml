@@ -5,11 +5,12 @@ experiment:
   description: OPD reproduction baseline adapted consistently for 8x RTX 6000 Ada 48GB.
   tags: [opd, reproduction, baseline, rtx6000-ada, 8gpu]
 
-# Keep the original models, dataset, batch size, rollout count, sequence lengths,
-# top-k recipe, learning rate, and one-epoch schedule. Only memory/runtime policy
-# differs from the A800 FP32 reference configuration.
+# Keep trainable actor parameters and Adam moments in FP32. This is not merely
+# an arithmetic-fidelity preference in the current FSDP path: model_dtype also
+# controls the stored parameter/optimizer dtype. With BF16 parameters and the
+# paper's 1e-6 learning rate, most updates quantize to zero.
 models:
-  dtype: bfloat16
+  dtype: fp32
 
 optimization:
   param_offload: false

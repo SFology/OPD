@@ -390,6 +390,28 @@ def render_command_script(command: list[str], config: dict[str, Any], run_dir: P
     return "\n".join(lines) + "\n"
 
 
+def validate_actor_training_precision(config: dict[str, Any]) -> None:
+    """Prevent silent no-op updates in the current low-precision FSDP path."""
+
+    model_dtype = str(config["models"].get("dtype", "")).lower()
+    fp32_names = {"fp32", "float32", "torch.float32"}
+    if model_dtype in fp32_names:
+        return
+    if not config["models"].get("allow_low_precision_actor_training", False):
+        raise ValueError(
+            "trainable OPD actor parameters must use FP32 in this FSDP path; "
+            f"models.dtype={model_dtype!r} also makes Adam moments low precision, "
+            "so the paper's 1e-6 updates can quantize to zero. Use models.dtype=fp32. "
+            "Only non-scientific plumbing probes may explicitly set "
+            "models.allow_low_precision_actor_training=true."
+        )
+    print(
+        "WARNING: low-precision trainable actor explicitly enabled; "
+        "do not use this run as an OPD effectiveness result",
+        file=sys.stderr,
+    )
+
+
 def validate(config: dict[str, Any]) -> None:
     required_sections = [
         "experiment", "storage", "data", "models", "distillation", "optimization",
@@ -405,6 +427,7 @@ def validate(config: dict[str, Any]) -> None:
         path = Path(config["models"][key])
         if not (path / "config.json").is_file():
             raise FileNotFoundError(f"model not found or incomplete: {path}")
+    validate_actor_training_precision(config)
     if config["trainer"]["n_gpus_per_node"] < 1:
         raise ValueError("trainer.n_gpus_per_node must be positive")
     ray_tmpdir = Path(config["runtime"].get("ray_tmpdir", "/tmp/lfk-ray"))
@@ -556,6 +579,11 @@ def main() -> int:
         config = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
         for expression in args.set:
             set_dotted(config, expression)
+        config = expand_env(config)
+        # Revalidate the frozen run configuration, not only the source config
+        # passed on the command line. Otherwise --resume-run could bypass new
+        # scientific safety checks such as the FP32 trainable-actor invariant.
+        validate(config)
     else:
         run_id = args.run_id or make_run_id(config, git)
         run_dir = experiments_root / run_id

@@ -7,7 +7,8 @@ experiment:
 
 # Preserve the original dataset, global batch, rollout count, 7168-token horizon,
 # Top-16 OPD objective, learning rate, and one-epoch schedule. These settings
-# change only numerical precision and memory/runtime policy.
+# change only sharding/offload and memory/runtime policy. FP32 is inherited
+# deliberately because BF16 trainable parameters swallow most 1e-6 updates.
 optimization:
   max_tokens_per_gpu: 8192
   param_offload: true

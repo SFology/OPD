@@ -16,21 +16,56 @@
 Based on HF math_verify, verl, open reasoner zero, etc.
 """
 
+import re
+import traceback
+
 from latex2sympy2_extended import latex2sympy
 from sympy import simplify
 from sympy.parsing.sympy_parser import parse_expr
-import traceback
 
-from .math_utils import extract_boxed_answer, is_latex_equal, grade_answer_mathd, grade_answer_sympy, timeout_ours
+from .math_utils import extract_boxed_answer, grade_answer_mathd, grade_answer_sympy, is_latex_equal, timeout_ours
 
 """
 This code is adapted from Entropy Machanism Recipe (https://github.com/volcengine/verl/tree/main/recipe/entropy/).
 """
 
-def extract_answer(passage: str) -> str:
-    if "\\boxed" in passage:
-        return extract_boxed_answer(passage)
-    return None
+_EXPLICIT_ANSWER_PATTERNS = (
+    re.compile(r"(?im)^\s*(?:final\s+answer|answer)\s*:\s*(.+?)\s*$"),
+    re.compile(r"(?im)^\s*(?:the\s+)?final\s+answer\s+is\s+(.+?)\s*$"),
+)
+
+
+def _trim_explicit_answer(answer: str) -> str:
+    """Remove presentation-only delimiters without guessing from reasoning text."""
+    answer = answer.strip()
+    if answer.startswith("$") and answer.endswith("$") and len(answer) >= 2:
+        answer = answer[1:-1].strip()
+    return answer.rstrip().rstrip(".。")
+
+
+def extract_answer_with_method(passage: str) -> tuple[str | None, str | None]:
+    """Extract a boxed or explicitly labelled final answer.
+
+    We intentionally do not fall back to the last number in a response: doing so
+    silently turns intermediate reasoning into a prediction when generation is
+    incomplete.
+    """
+    if "\\boxed" in passage or "\\fbox" in passage:
+        boxed = extract_boxed_answer(passage)
+        if boxed is not None:
+            return boxed, "boxed"
+    for pattern in _EXPLICIT_ANSWER_PATTERNS:
+        matches = pattern.findall(passage)
+        if matches:
+            answer = _trim_explicit_answer(matches[-1])
+            if answer:
+                return answer, "explicit_answer"
+    return None, None
+
+
+def extract_answer(passage: str) -> str | None:
+    answer, _ = extract_answer_with_method(passage)
+    return answer
 
 
 def grade(model_answer: str, gt_answer: str, fast: bool = True):
@@ -54,18 +89,18 @@ def simplify_expression_string(expression_string: str) -> str:
         return str(simplified_expr)
     except TimeoutError:
         return expression_string
-    except Exception as e:
+    except Exception:
         try:
             sympy_expr = latex2sympy(expression_string)
             simplified_expr = simplify(sympy_expr)
             return str(simplified_expr)
         except TimeoutError:
             return expression_string
-        except Exception as e:
+        except Exception:
             return expression_string
 
 def compute_score(model_response, gt_answer, fast=False):
-    model_answer = extract_answer(model_response)
+    model_answer, extraction_method = extract_answer_with_method(model_response)
 
     if model_answer is None:
         return {
@@ -74,6 +109,7 @@ def compute_score(model_response, gt_answer, fast=False):
             "acc": False,
             "extracted_gt": gt_answer,
             "pred": "",
+            "extraction_method": None,
         }
         # return 0.0, 0.0  # Cannot even parse anything.
     is_correct = False
@@ -92,6 +128,7 @@ def compute_score(model_response, gt_answer, fast=False):
             "acc": True,
             "extracted_gt": gt_answer,
             "pred": model_answer,
+            "extraction_method": extraction_method,
         }
     else:
         return {
@@ -100,6 +137,7 @@ def compute_score(model_response, gt_answer, fast=False):
             "acc": False,
             "extracted_gt": gt_answer,
             "pred": model_answer,
+            "extraction_method": extraction_method,
         }
 
 def reward_func(

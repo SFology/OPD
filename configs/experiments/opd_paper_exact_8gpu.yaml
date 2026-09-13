@@ -1,0 +1,12 @@
+extends: opd_default.yaml
+
+experiment:
+  name: opd_paper_exact_8gpu
+  description: Paper-default OPD reproduction using fp32 model shards on eight GPUs.
+  tags: [opd, reproduction, paper-exact, fp32, 8gpu]
+
+logging:
+  swanlab_mode: local
+
+runtime:
+  cuda_launch_blocking: false

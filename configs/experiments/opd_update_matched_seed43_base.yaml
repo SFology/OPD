@@ -1,0 +1,23 @@
+extends: opd_dense_discrete_lcb_base.yaml
+
+experiment:
+  name: opd_update_matched_seed43_base
+  description: Common seed-43 configuration for update-magnitude-matched OPD/ROPD controls.
+  tags: [opd, ropd, update-matched, seed43, dense-discrete, confirmatory]
+  seed: 43
+
+distillation:
+  robust_opd:
+    # Child configs select exactly one arm. All arms still compute the same
+    # neighborhood diagnostics so their measurement overhead is matched.
+    training_reward_mode: opd
+    apply_to_training: false
+    fixed_opd_scale: 0.18
+    normalization_epsilon: 1.0e-8
+    max_normalization_scale: 20.0
+
+trainer:
+  # Seven evenly spaced checkpoints plus the final step are sufficient for
+  # trajectory analysis without multiplying four-arm storage unnecessarily.
+  save_freq: 40
+  max_actor_ckpt_to_keep: 8

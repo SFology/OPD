@@ -1,0 +1,11 @@
+extends: opd_update_matched_seed43_base.yaml
+
+experiment:
+  name: opd_update_matched_seed43_opd
+  description: Original OPD control with matched ROPD diagnostic overhead.
+  tags: [opd, update-matched, seed43, control]
+
+distillation:
+  robust_opd:
+    training_reward_mode: opd
+    apply_to_training: false

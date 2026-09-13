@@ -6,10 +6,13 @@ CONDA_SH=/remote-home/share/anaconda3/etc/profile.d/conda.sh
 TMUX_BIN=/attached/remote-home1/liufengkai/tools/tmux-env/bin/tmux
 STORAGE_ROOT=/attached/remote-home1/liufengkai/opd
 MODEL_DIR=$STORAGE_ROOT/models
-PROBE_CONFIG=configs/experiments/opd_completion_first_4gpu_probe.yaml
-FULL_CONFIG=configs/experiments/opd_completion_first_4gpu.yaml
+PROBE_CONFIG=configs/experiments/opd_fp32_offload_probe.yaml
+FULL_CONFIG=configs/experiments/opd_fp32_offload.yaml
 
-MODE=probe-then-full
+# Stop after the resource/precision probe by default. A successful process exit
+# is not sufficient evidence that lr=1e-6 produced effective parameter updates;
+# inspect the probe checkpoint before explicitly selecting --mode full.
+MODE=probe
 GPU_COUNT=4
 MIN_FREE_MIB=43000
 MAX_UTIL=10
@@ -23,6 +26,7 @@ usage() {
     echo "Usage: $0 [--mode probe|full|probe-then-full] [--session NAME]"
     echo "          [--gpu-count N] [--min-free-mib N] [--max-util N]"
     echo "          [--stable-samples N] [--poll-seconds N]"
+    echo "          [--probe-config PATH] [--full-config PATH]"
 }
 
 while (($#)); do
@@ -34,6 +38,8 @@ while (($#)); do
         --max-util) MAX_UTIL=$2; shift 2 ;;
         --stable-samples) STABLE_SAMPLES=$2; shift 2 ;;
         --poll-seconds) POLL_SECONDS=$2; shift 2 ;;
+        --probe-config) PROBE_CONFIG=$2; shift 2 ;;
+        --full-config) FULL_CONFIG=$2; shift 2 ;;
         --worker) WORKER=true; shift ;;
         --orchestration-log) ORCH_LOG=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -71,6 +77,7 @@ if [[ "$WORKER" != true ]]; then
         --mode "$MODE" --session "$SESSION" --gpu-count "$GPU_COUNT"
         --min-free-mib "$MIN_FREE_MIB" --max-util "$MAX_UTIL"
         --stable-samples "$STABLE_SAMPLES" --poll-seconds "$POLL_SECONDS"
+        --probe-config "$PROBE_CONFIG" --full-config "$FULL_CONFIG"
     )
     printf -v worker_command '%q ' "${worker[@]}"
     "$TMUX_BIN" new-session -d -s "$SESSION" "bash -lc '$worker_command'"
@@ -95,6 +102,9 @@ cd "$REPO"
 export OPD_ROOT=$REPO
 export OPD_STORAGE_ROOT=$STORAGE_ROOT
 export OPD_MODEL_DIR=$MODEL_DIR
+
+[[ -f "$PROBE_CONFIG" ]] || { echo "Probe config not found: $PROBE_CONFIG" >&2; exit 2; }
+[[ -f "$FULL_CONFIG" ]] || { echo "Full config not found: $FULL_CONFIG" >&2; exit 2; }
 
 echo "Started at $(date -u --iso-8601=seconds)"
 echo "Mode=$MODE GPU_COUNT=$GPU_COUNT MIN_FREE_MIB=$MIN_FREE_MIB MAX_UTIL=$MAX_UTIL"

@@ -114,6 +114,99 @@ def validate_dense_discrete_config(config: dict[str, Any]) -> None:
             raise ValueError("robust_opd.lcb_epsilon must be positive")
         if int(config.get("max_sparse_requests_per_trajectory", 65536)) < 1:
             raise ValueError("robust_opd.max_sparse_requests_per_trajectory must be positive")
+        training_mode = resolve_training_reward_mode(config)
+        if training_mode == "scaled_opd" and float(config.get("fixed_opd_scale", 1.0)) <= 0:
+            raise ValueError("robust_opd.fixed_opd_scale must be positive")
+        if float(config.get("normalization_epsilon", 1e-8)) <= 0:
+            raise ValueError("robust_opd.normalization_epsilon must be positive")
+        if float(config.get("max_normalization_scale", 20.0)) < 1.0:
+            raise ValueError("robust_opd.max_normalization_scale must be >= 1")
+
+
+def resolve_training_reward_mode(config: dict[str, Any]) -> str:
+    """Resolve the training arm while preserving old apply_to_training configs."""
+
+    explicit = config.get("training_reward_mode")
+    if explicit is None:
+        return "ropd" if bool(config.get("apply_to_training", False)) else "opd"
+    mode = str(explicit)
+    allowed = {"opd", "scaled_opd", "ropd", "normalized_ropd"}
+    if mode not in allowed:
+        raise ValueError(
+            "robust_opd.training_reward_mode must be one of " + ", ".join(sorted(allowed))
+        )
+    if "apply_to_training" in config:
+        expected = mode != "opd"
+        if bool(config["apply_to_training"]) != expected:
+            raise ValueError(
+                "robust_opd.apply_to_training conflicts with training_reward_mode=" + mode
+            )
+    return mode
+
+
+def select_training_rewards(
+    *,
+    opd_scores: torch.Tensor,
+    ropd_scores: torch.Tensor,
+    response_mask: torch.Tensor,
+    config: dict[str, Any],
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Select an update-magnitude control arm from matched OPD/ROPD scores.
+
+    ``normalized_ropd`` preserves ROPD's token-relative weighting but rescales
+    its per-token scalar reward RMS to the original OPD RMS within the current
+    batch. This separates selective gating from a global reduction in update
+    magnitude without consulting answer labels.
+    """
+
+    mode = resolve_training_reward_mode(config)
+    opd = opd_scores.detach().cpu().float()
+    ropd = ropd_scores.detach().cpu().float()
+    mask = response_mask.detach().cpu().bool()
+    if opd.shape != ropd.shape or opd.shape[:2] != mask.shape:
+        raise ValueError("OPD/ROPD score tensors do not match response_mask")
+    token_opd = opd.sum(dim=-1)[mask]
+    token_ropd = ropd.sum(dim=-1)[mask]
+    opd_rms = float(torch.sqrt(torch.mean(token_opd.square()))) if token_opd.numel() else 0.0
+    ropd_rms = float(torch.sqrt(torch.mean(token_ropd.square()))) if token_ropd.numel() else 0.0
+    scale = 1.0
+    degenerate = 0.0
+    clipped = 0.0
+    if mode == "opd":
+        selected = opd
+    elif mode == "scaled_opd":
+        scale = float(config.get("fixed_opd_scale", 1.0))
+        selected = opd * scale
+    elif mode == "ropd":
+        selected = ropd
+    else:
+        epsilon = float(config.get("normalization_epsilon", 1e-8))
+        maximum = float(config.get("max_normalization_scale", 20.0))
+        if ropd_rms <= epsilon:
+            scale = 1.0
+            degenerate = 1.0
+        else:
+            raw_scale = opd_rms / ropd_rms
+            scale = min(raw_scale, maximum)
+            clipped = float(raw_scale > maximum)
+        selected = ropd * scale
+    selected_tokens = selected.sum(dim=-1)[mask]
+    selected_rms = (
+        float(torch.sqrt(torch.mean(selected_tokens.square())))
+        if selected_tokens.numel()
+        else 0.0
+    )
+    return selected, {
+        "ropd/training_reward_mode_id": float(
+            {"opd": 0, "scaled_opd": 1, "ropd": 2, "normalized_ropd": 3}[mode]
+        ),
+        "ropd/training_reward_scale": scale,
+        "ropd/training_opd_token_rms": opd_rms,
+        "ropd/training_ropd_token_rms": ropd_rms,
+        "ropd/training_selected_token_rms": selected_rms,
+        "ropd/training_normalization_degenerate": degenerate,
+        "ropd/training_normalization_clipped": clipped,
+    }
 
 
 def _model_fingerprint(model_path: Path, projection_dim: int, seed: int, projection_method: str) -> str:
@@ -1024,6 +1117,7 @@ def append_ropd_diagnostics(
     metrics: dict[str, float],
     samples: list[dict[str, Any]],
     apply_to_training: bool,
+    training_reward_mode: str | None = None,
 ) -> None:
     """Append durable driver-side diagnostics for later analysis."""
 
@@ -1033,6 +1127,8 @@ def append_ropd_diagnostics(
     summary = {
         "step": step,
         "apply_to_training": apply_to_training,
+        "training_reward_mode": training_reward_mode
+        or ("ropd" if apply_to_training else "opd"),
         **metrics,
     }
     with (metrics_dir / "ropd_step_metrics.jsonl").open("a", encoding="utf-8") as handle:

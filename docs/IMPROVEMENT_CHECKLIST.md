@@ -1,10 +1,14 @@
 # OPD / ROPD 改进清单
 
-最后更新：2026-09-07 UTC
+最后更新：2026-09-11 UTC
 
 本文件是后续工程修复、实验完善和科学验证的持续清单。发现新的问题时追加条目；完成后保留原条目并将
 `[ ]` 改为 `[x]`，同时填写完成日期、commit 或实验目录以及验收结果。不要仅因代码已经写出就标记完成：
 涉及实验结论的条目必须有结果文件和验收证据。
+
+维护约定：在后续会话中，只要分析或复盘报告提出了新的、可执行的工程或科学改进项，就在同一轮工作中
+自动追加到本清单或补充已有条目，无需等待再次提醒。完成改进后同步勾选并填写证据；纯猜想在尚未形成
+可执行改进和验收标准前不登记。
 
 状态约定：
 
@@ -24,6 +28,10 @@
   - 验收：覆盖 boxed、Answer、前导零、LaTeX、无法解析和错误答案的单元测试；在固定生成样本上人工
     抽查；分别报告 `parse_rate`、总样本 accuracy 和 parse-success conditional accuracy。
   - 相关代码：`verl/verl/utils/reward_score/ttrl_math/`、`scripts/val/eval/grade.py`。
+  - 进展：2026-09-10 已让 `ttrl_math` 同时支持完整 `\boxed{...}`、行级 `Answer:`、`Final answer:`
+    和 `The final answer is ...`，同时明确禁止把未标注的最后一个数字作为答案；前导零与整数/浮点表示
+    沿用符号等价判定。新增 9 个 CPU 测试覆盖正确、错误、前导零、LaTeX、未标注推理数字和未闭合
+    box，全部通过。仍需在正式生成完成后做固定样本人工抽查，故本条暂不勾选。
 
 - [ ] **IMP-002（P0）把“教师分布奖励”和“答案正确性”在命名与看板中彻底分开。**
   - 问题：verl 配置中的 `reward_model` 实际承载冻结 teacher policy；`critic/score` 是 OPD token
@@ -35,21 +43,35 @@
   - 已完成子项：2026-09-07 将 `true_reward_score` 恢复为可选监控字段；没有 verifier 分数的普通
     OPD batch 不再因指标统计报错，并新增有/无该字段的 CPU 测试。整体命名与看板改进仍未完成。
 
-- [ ] **IMP-003（P0）建立独立、可复现的固定测试集评测流程。**
+- [x] **IMP-003（P0）建立独立、可复现的固定测试集评测流程。**
   - 问题：当前完整训练配置使用 `test_freq=-1`、`val_before_train=false`，训练日志中的
     `critic/true_reward` 只是训练 rollout 正确率，不是 AIME/AMC 泛化性能。
   - 改进：对初始学生、原始 OPD checkpoint、ROPD checkpoint 使用完全相同的生成参数、样本数、随机
     种子和 grader，单独评测 AIME24、AIME25、AMC23；保存逐题逐 rollout 原始输出与评分结果。
   - 验收：每个 checkpoint 都有 manifest、generation JSONL、grading 结果、解析率、pass@1/Avg@N、
     bootstrap 95% CI；报告中明确区分训练监控和 held-out evaluation。
+  - 完成证据：2026-09-10 的正式评测
+    `20260910_opd_ropd_seed42_formal_evaluation` 已以退出码 0 完成；初始学生、OPD step 279、ROPD
+    step 279 各完成 48/48 shards、2288/2288 条生成，共 6864 条且配对 seed 不匹配数为 0。目录中保留
+    manifest、逐条 generation/grading、数据集分层 summary、配对 prompt-bootstrap 95% CI、SVG/HTML
+    看板，并已回写两个训练 run 的 evaluation 指针。训练监控与 held-out evaluation 在报告中分开。
 
-- [ ] **IMP-004（P0）完成严格配对的 OPD / ROPD 训练对比。**
+- [ ] **IMP-004（P0）完成严格配对且更新有效的 OPD / ROPD 训练对比。**
   - 当前状态：完整 OPD 控制臂配置为 `apply_to_training=false`；它会测量 LCB/ROPD，但训练仍使用原始
     OPD reward。不能把该运行当作 ROPD 效果。
   - 改进：控制臂和处理臂仅允许 `apply_to_training` 不同；使用相同初始权重、数据顺序、seed、GPU 数、
     batch、rollout 和测量开销。先确认控制臂完整落盘，再启动处理臂。
   - 验收：两臂均正常完成、无 NaN/Inf、checkpoint 可加载；按 IMP-003 完成统一评测；同时比较训练
     稳定性、奖励分布、长度和耗时。
+  - 历史进展：原始 OPD 控制臂
+    `20260906_045836_opd_dense_discrete_lcb_opd_seed42_c200eae` 已于 2026-09-07 完成 279 步；ROPD
+    处理臂 `20260907_164248_opd_dense_discrete_lcb_treatment_seed42_693bda4` 已于 2026-09-09 完成
+    279 步，退出码为 0；两个 run 的最终 FSDP model/optimizer rank 0/1 shard 和 tokenizer/config 均存在。
+    独立评测也已完成：固定预算总体 accuracy 为 OPD 38.90%、ROPD 38.94%，配对差
+    `ROPD-OPD=+0.04 pp`、95% CI `[-1.49,+1.53] pp`，因此本轮完成了严格比较，但没有证据表明默认
+    ROPD 优于 OPD。2026-09-11 的 IMP-030/032 审计进一步证明两臂均使用 BF16 actor/Adam moments，
+    `1e-6` 更新大面积被量化吞掉。因此产物配对和评测流程虽然完成，但这不是“更新有效”的方法效果对比，
+    本条重新打开；需在 FP32 原始 OPD 复现通过后重跑至少一个严格配对的 FP32 ROPD 条件。
 
 ## ROPD 方法与实现
 
@@ -74,6 +96,10 @@
     聚合温度和归一化方式。调参不得使用最终测试集标签。
   - 验收：报告 trust/risk 分布、非零有效质量、与 `(T+,S-)` 对 `(T-,S-)` 的区分度及置信区间；明确
     选择阈值的数据来源。
+  - 完整运行证据：seed 42 处理臂 279 步的平均 `zero_trust_fraction=86.46%`、平均
+    `trust_mean=0.115`，最终一步分别为 90.13% 和 0.080。相对 OPD 控制臂，处理臂平均 actor
+    `grad_norm` 从 1.812 降至 0.323（约 -82%），训练 rollout verifier correctness 仅从 19.87%
+    描述性变为 20.07%。这支持“默认门控主要在压低学习信号”的担忧，但尚未证明门控与教师可靠性相关。
 
 - [ ] **IMP-008（P0）审计稠密离散邻域的语义有效性。**
   - 问题：同 prompt、相近进度和双球约束并不自动保证两个推理状态语义等价；错误邻居会把正常决策变化
@@ -122,13 +148,28 @@
     标注 underpowered，不反复观察结果后改变停止规则。
 
 - [ ] **IMP-015（P1）量化无效输出造成的选择偏差，但不把截断作为学术问题。**
-  - 改进：修复长度/格式工程问题后，只在可解析、非截断样本上研究教师可靠性；同时报告各组/q-point
-    纳入率，并对 late-q 结论做敏感性分析。
+  - 当前证据：7168 是完整 response（推理过程加最终答案）的生成上限，不是最终答案字段长度。当前完整
+    控制臂平均 response 长度约 5687 token、约 53.9% 轨迹触及上限；完整处理臂均值约 5624 token、
+    约 52.5% 轨迹触及上限，说明该上限是显著的工程有效性约束。
+  - 改进：原始 OPD 复现保留 7168 以保持口径；用于方法结论的新 OPD/ROPD 对照应先通过 IMP-022
+    标定更长预算，并让两臂使用完全相同的长度配置。修复长度/格式工程问题后，只在可解析、非截断样本上
+    研究教师可靠性；同时报告各组/q-point 纳入率，并对 late-q 结论做敏感性分析。
   - 验收：有效性过滤规则在看结果前固定；解析失败、长度上限和其他排除原因分开统计。
+  - 进展：2026-09-10 的正式评测分析已预先固定两套口径：固定 7168-token 预算的总体 accuracy 为主
+    指标；另外分别报告 parse rate、at-limit rate、可解析且未触及上限的比例及其条件正确率。条件结果
+    只作为工程有效性敏感性检查，不把截断包装为学术发现。完整评测中初始/OPD/ROPD 的 parse rate
+    分别为 41.78%/43.66%/44.14%，at-limit rate 为 60.45%/58.52%/58.13%，所有未触及长度上限的输出
+    均可解析；可解析条件正确率分别为 88.91%/89.09%/88.22%。这说明低解析率主要来自 7168-token
+    工程上限，而非当前 parser 漏判；更长预算与有效样本敏感性分析仍未完成，故本条不勾选。
 
 - [ ] **IMP-016（P1）用多 seed 和预先声明的主要终点支持普遍性结论。**
-  - 改进：至少复现实验于多个训练 seed；主要终点优先为 AIME24/AIME25/AMC23 held-out correctness、
-    训练稳定性和可靠性指标区分度，避免在大量指标中事后挑选。
+  - 改进：以严格配对的 seed 42 为首个完整对照；主要效应方向稳定后，再补 seed 43、44，形成至少三个
+    训练 seed。每个 seed 的 OPD/ROPD 必须共享初始权重、数据顺序、解码参数和评测随机数方案。主要终点
+    优先为扩展后的 held-out correctness、训练稳定性和可靠性指标区分度，避免在大量指标中事后挑选；
+    不以简单增加 epoch 代替独立 seed。
+  - 资源预算：当前 2×RTX 6000 Ada、7168 token、完整 DAPO-Math-17k 的单条件实测约 35.7 小时；在
+    seed 42 已完成配对的前提下，补两个 seed 的四个条件约需 143 小时双卡时间。实际启动前用 IMP-022
+    的短程标定更新预算。
   - 验收：报告 seed 间方差、配对差值 CI、数据集分层结果；清楚区分探索性与验证性分析。
 
 ## 实验管理与维护
@@ -150,9 +191,13 @@
     commit 通过 350 个 Python 文件 AST 检查、全部 Shell 语法检查、24 个 YAML 解析检查、两套 LCB
     probe dry-run，以及 44 个 OPD/ROPD CPU 测试。
 
-- [ ] **IMP-019（P1）让本清单进入每次正式实验的收尾流程。**
+- [x] **IMP-019（P1）让本清单进入每次正式实验的收尾流程。**
   - 改进：实验结束后检查是否完成某个条目、是否暴露新问题；更新日期、状态、证据目录和新的待办。
+    按 2026-09-08 的维护约定，任何分析报告中形成的可执行改进应在报告后自动登记，不再等待用户再次
+    发出“写入待办”的指令。
   - 验收：下一次正式实验报告或 handoff 明确引用本文件，已完成事项具有 commit/run/result 证据。
+  - 完成证据：2026-09-10 在 seed 42 配对训练完成后的状态检查中，自动更新 IMP-003/004/007 的状态和
+    运行证据，并新增 IMP-024；OPD 交接 skill 已要求后续报告继续执行同一规则。
 
 - [ ] **IMP-020（P2）消除数学 grader 中的 Python 非法转义告警。**
   - 发现日期：2026-09-07。
@@ -161,6 +206,194 @@
     运行，但未来 Python 版本可能收紧处理。
   - 验收：改写后在 `PYTHONWARNINGS=error` 下导入相关 grader 无告警；现有及 IMP-001 新增答案解析
     测试全部通过。
+
+- [x] **IMP-026（P0）建立本轮 OPD/ROPD 的受管、可恢复独立评测启动器。**
+  - 发现日期：2026-09-10。
+  - 问题：现有 `scripts/val/eval/gen_vllm.py` 硬编码 8 张 GPU、旧模型路径和 31744-token 上限，不能
+    直接用于 seed 42 的 7168-token OPD/ROPD 配对评测；两个 FSDP checkpoint 还需先合并为
+    HuggingFace 格式。
+  - 改进：自动选择空闲 GPU，依次评测初始模型、OPD step 279 和 ROPD step 279；冻结 AIME24、
+    AIME25、AMC23 的 143 题、每题 16 次生成、temperature 0.7、top-p 0.95、7168-token 上限及随机数
+    方案。checkpoint 合并、逐 shard 生成、数据集感知评分、bootstrap 汇总均需可恢复，并写入各训练
+    run 的 `evaluation/` 子目录。
+  - 资源预算：三个模型共 6864 条生成；依据本轮平均 response 长度约 5600 token 和训练实测吞吐，
+    2 GPU 初步估计约 7--10 小时墙钟时间，两个训练后 checkpoint 约 4.5--7 小时。启动前用固定的
+    10 题×1 rollout 短测校准吞吐并更新 ETA。
+  - 验收：dry-run 验证模型、题目数、生成数和参数；短测与完整任务均无硬编码 GPU；断点重启不会覆盖
+    已完成 shard；输出逐题结果、解析率、分层 accuracy/pass@k、prompt-cluster bootstrap 95% CI，且
+    明确区分初始、OPD、ROPD。
+  - 进展证据：2026-09-10 已加入配置、FSDP 合并、自动空闲 GPU 选择、原子 shard、损坏 shard 隔离、
+    三次失败重试、状态文件、逐请求配对 seed、确定性 grader、prompt-bootstrap、SVG/HTML 看板和 tmux
+    启动器。静态编译、Shell 语法、Ruff、13 个 CPU 测试和 prepare-only 均通过；prepare-only 实测
+    `143 prompts / 6864 generations / 48 shards per model`，最长 prompt 为 413 token。随后完整任务自动
+    选择 GPU 2/3，于 2026-09-10 11:42--13:44 UTC 在约 2 小时 2 分钟内以退出码 0 完成；三模型均为
+    48/48 shards、2288/2288 条，分析结果与看板齐全，断点/原子 shard 机制未发现损坏产物。
+
+## 规模扩展与算力标定
+
+- [ ] **IMP-021（P0）把 held-out 评测扩展到足够多的独立问题。**
+  - 发现日期：2026-09-08。
+  - 问题：当前 AIME24 30 题、AIME25 30 题、AMC23 83 题，共 143 个独立问题；`validation_n=16`
+    只能降低同题解码方差，不能提供 16 倍的任务覆盖。在正确率约 30% 时，单个 30 题 AIME 集合的
+    95% 区间仍约有 15--16 个百分点的半宽。
+  - 改进：优先把统一 grader 的 held-out 数学评测扩展到至少 500 个、目标 1000 个独立问题，同时保留
+    AIME24/AIME25/AMC23 分层结果。冻结题目清单、去重规则、prompt 模板、生成参数和随机种子；防止与
+    DAPO-Math-17k 训练集污染。增加独立题目优先于仅增加同题 rollout 数。
+  - 验收：逐题原始输出和评分可追溯；报告 unique prompt 数、每题 rollout 数、解析率、数据集分层
+    accuracy/pass@k，以及 prompt-cluster bootstrap 95% CI；给出训练集去重或污染审计记录。
+  - 进展：2026-09-10 已恢复并转换 MATH-500（500 题）、Minerva（272 题）和 Olympiad-Bench
+    （675 题），与原有 143 题组成 1590-prompt 扩展评测；配置为每题 4 次、31,744-token 上限，共
+    25,440 次四模型生成。prepare-only 已核验全部模型、prompt 长度和预计分片；规范化精确重合审计
+    显示 DAPO-Math-17K 训练集重合 0/1590、评测内部重复 0，但该审计不能排除语义改写。正式生成与
+    结果仍待运行，因此本条不勾选。
+
+- [ ] **IMP-022（P1）建立 GPU 数量与 response 长度的短程算力标定矩阵。**
+  - 发现日期：2026-09-08。
+  - 问题：目前只有 2 GPU、7168 response token 的完整实测；4/8 GPU 加速比例以及 8192/12288 等更长
+    response 预算的显存和吞吐没有证据。RTX 6000 Ada 通过 PCIe 通信，不能假设 GPU 数翻倍就线性加速。
+  - 改进：使用固定数据、固定 seed 和同一训练条件，各运行 5--10 个代表性训练步；在资源允许时比较
+    2/4/8 GPU，并比较 7168/8192/12288 response 上限。记录生成、teacher scoring、ROPD support、actor
+    update、checkpoint 各阶段耗时，以及 token throughput、CPU 内存、GPU 峰值和 OOM 情况。长程实验
+    只能在短程结果完成后排期。
+  - 验收：生成一份可机器读取的 benchmark 表和可读报告；给出每个正式条件的预计 wall time、GPU-hours、
+    存储预算和安全启动阈值，并明确实测值与外推值。
+  - 证据：当前基准为控制臂 279 步、128488.7 秒、约 4.17 亿 token；待补充多 GPU/多长度结果。
+
+- [ ] **IMP-023（P1）验证跨模型和跨数据分布的可迁移性。**
+  - 发现日期：2026-09-08。
+  - 问题：当前训练结论只来自 DeepSeek-R1-Distill-Qwen-1.5B 学生、JustRL-DeepSeek-1.5B 教师和单一
+    数学训练域；即使多 seed 显著，也不能直接声称是普遍的 OPD 规律。
+  - 改进：在 IMP-004、IMP-003/021 和 IMP-016 给出稳定主效应后，至少增加一组能力差异更明确的师生
+    组合，并增加一个预先声明的分布外或不同难度数学评测层。7B 或更大模型只能先做短步显存 probe，
+    不因名义总显存直接启动完整训练。
+  - 验收：不同模型对和数据层使用一致的主要终点与配对对照；分别报告效应量和置信区间，并区分
+    “同模型族复现”“跨规模迁移”“跨分布迁移”。
+  - 证据：待补充。
+
+- [ ] **IMP-024（P2）清理训练完成后的 Ray/SwanLab 退出异常。**
+  - 发现日期：2026-09-10。
+  - 问题：seed 42 的 OPD 和 ROPD 均成功完成并写出最终 checkpoint，但退出阶段日志出现 SwanLab
+    `RuntimeError: cannot join current thread`；ROPD 日志还夹杂 Ray DataLoader worker 在结束阶段收到
+    `Killed` 信号的 traceback。当前外层进程仍以退出码 0 完成，不影响已落盘训练结果，但会污染错误
+    监控并可能掩盖未来真实故障。
+  - 改进：在 Ray worker 关闭前显式、幂等地 finalize logger，避免从 tracking 析构函数所在 consumer
+    thread 再调用 `finish()`；区分预期 worker shutdown 与训练中 worker failure。
+  - 验收：至少一个短 smoke run 在保存最终 checkpoint 后无上述 traceback；重复 finalize 不报错；
+    真正的数据 worker 异常仍能传递非零退出码并写入 `status.yaml`。
+  - 证据：上述两个完整 run 的 `logs/train.log` 尾部；修复 commit 待补充。
+
+- [ ] **IMP-025（P0）用更新幅度匹配的对照分离“可靠性门控”和“整体缩小学习信号”。**
+  - 发现日期：2026-09-10。
+  - 问题：seed 42 完整处理臂的平均 OPD token reward 为约 -0.256，门控后 ROPD reward 为约
+    -0.048；actor `grad_norm` 也从控制臂 1.812 降到 0.323。当前 ROPD 因此近似同时施加了选择性门控
+    和约 80% 的全局更新衰减。若只比较原始 OPD 与当前 ROPD，任何性能差异都可能来自等效学习率变化，
+    不能归因于教师可靠性判断。
+  - 改进：在不使用最终测试标签的 frozen calibration 数据上确定全局缩放系数，增加
+    `scaled-OPD`（所有 token 统一缩放到与 ROPD 相近的 reward RMS/梯度范数）对照；同时评估一个保持
+    ROPD token 相对权重但把整体 RMS 恢复到 OPD 水平的 `normalized-ROPD` 消融。先短程确认 update norm
+    匹配，再决定是否完整训练。
+  - 验收：至少比较 OPD、scaled-OPD、ROPD 和 normalized-ROPD；报告 reward RMS、gradient norm、
+    effective token mass、训练稳定性和统一 held-out correctness。只有 ROPD 在幅度匹配后仍优于全局
+    缩放，才把收益归因于选择性可靠性门控。
+  - 进展：2026-09-10 已实现 `opd`、`scaled_opd`、`ropd`、`normalized_ropd` 四种训练 reward mode；
+    normalized-ROPD 按 batch 把 scalar token reward RMS 恢复到 OPD 水平，并记录缩放、RMS、clip 与
+    degenerate 指标。新增 seed 43 四臂配置、自动选择 2--4 张空闲 GPU 的顺序 tmux 启动器和 CPU
+    测试；所有配置 dry-run 通过。2026-09-11 发现原先 `fixed_opd_scale=0.18` 来自 BF16 近乎无效训练，
+    不能直接冻结为正式 FP32 对照的校准值；必须先用不读取最终测试标签的 FP32 短程 calibration 重新估计，
+    再完成 5 步四臂 probe 并验证梯度/RMS。此前不要启动完整四臂训练，故不勾选。
+  - 证据：seed 42 配对 run 的 `metrics/ropd_step_metrics.jsonl` 与 `logs/train.log`；实现和 probe 配置
+    位于 `verl/verl/trainer/ppo/robust_opd.py`、`configs/experiments/opd_update_matched_seed43_*.yaml`。
+
+- [x] **IMP-027（P1）清理正式评测最终状态中的过期阶段字段。**
+  - 发现日期：2026-09-10。
+  - 问题：本次评测完成后的 `status.yaml` 正确标记了 `status: completed`、`stage: complete`，但仍保留
+    上一阶段的 `model: ropd_step279`、`completed_shards: 0`、`total_shards: 48`。实际结果是该模型
+    48/48 shards、2288/2288 条均已完成；过期字段会使自动状态检查误报。
+  - 改进：阶段切换和最终完成时显式清除瞬态的 model/shard 字段，或把阶段进度移入独立的嵌套结构；
+    状态查看器应以产物清单交叉校验聚合状态。
+  - 验收：完成态只显示最终聚合计数，失败/恢复态仍能准确显示当前模型和 shard；增加状态转换 CPU 测试。
+  - 完成证据：2026-09-10 的 `update_status(clear_fields=...)` 已在 merge、analysis、complete 转换中
+    清除 model/shard 瞬态字段，完成态同时清除旧 error/traceback；CPU 状态转换测试验证最终字段不存在。
+    既有冻结 run 的历史 `status.yaml` 不回写，新运行自动采用修复。
+
+- [x] **IMP-028（P1）为正式评测补充配对的 pass@k 差值置信区间。**
+  - 发现日期：2026-09-10。
+  - 问题：当前看板展示各模型 pass@k 点估计/边际区间，但主要比较表只对 Avg@16（等价于总体
+    pass@1）计算配对差值 CI。ROPD 相对 OPD 的 pass@16 点估计高 3.50 pp，若没有配对差值区间容易
+    被误读为可靠提升；本轮补算的 95% CI 为 `[-0.70,+8.39] pp`，仍跨过 0。
+  - 改进：在正式分析脚本中按 prompt 进行配对 bootstrap，输出每个预先声明的 k 的模型差值、95% CI
+    和方向翻转计数；明确主要终点与探索性终点，避免事后选择最有利的 k。
+  - 验收：CSV、JSON、SVG/HTML 同时包含配对 pass@k 差值和区间，CPU 测试覆盖配对样本顺序与缺失值。
+  - 完成证据：2026-09-10 正式分析器已对所有预声明 k 输出配对差、prompt-bootstrap 95% CI 和逐题
+    胜/平/负计数，生成 `paired_pass_at_k_deltas.svg`、CSV、JSON 与 HTML；随机流按指标命名，防止新增
+    统计改变旧 CI。合成 CPU 分析测试覆盖了 pass@k 配对列和 SVG 产物。
+
+- [x] **IMP-029（P0）按论文 31,744-token 评测口径复核原始 OPD 的提升幅度。**
+  - 发现日期：2026-09-10。
+  - 问题：当前 `OPD−initial=+1.75 pp` 来自 7168-token 评测，初始/OPD 约 60.45%/58.52% 的输出
+    达到上限；论文正式评测是每题 16 次、temperature 0.7、top-p 0.95、31,744-token response 上限，
+    并报告同一师生组合回收超过 80% 的教师—学生 gap。两个数字不能直接比较。
+  - 改进：使用初始学生、JustRL 教师、seed 42 OPD/ROPD step 279 四模型，在原论文 143 题上完成
+    9152 次论文口径生成；按数据集报告 avg@16，并以配对 prompt bootstrap 计算训练后提升和 gap
+    recovery。先复核现有 checkpoint，不能因为短预算结果偏低就直接重训。
+  - 验收：四模型全部分片完整、配对 seed 无误；parse/at-limit/完整率分开报告；教师 gap 为正时给出
+    recovery 点估计与 95% CI，并和论文“超过 80%”作同口径讨论。
+  - 完成证据：`20260910_165940_opd_ropd_seed42_formal_evaluation` 于 2026-09-11 03:06 UTC 以退出码
+    0 完成；四模型均为 48/48 shards、2288/2288 条，共 9152 条生成，分析和看板齐全。31,744-token
+    口径下初始学生/教师/OPD/ROPD average correctness 为 48.95%/66.56%/48.82%/50.70%；教师—学生
+    gap 为 17.61 pp，OPD gap recovery 为 -0.74%（95% CI `[-11.16%,8.65%]`），ROPD 为 9.93%
+    （95% CI `[-0.23%,19.24%]`）。OPD 并未复现论文所报超过 80% gap recovery，满足 IMP-030 的
+    条件性数值/训练配置复核触发条件。
+
+- [ ] **IMP-030（P1）仅在长预算评测仍异常时复核 fp32/8-GPU 论文训练数值设置。**
+  - 发现日期：2026-09-10。
+  - 问题：当前完成的控制臂采用 bf16、2×RTX 6000 Ada 和 CPU offload；论文默认训练配置是 fp32、
+    8×A800。目标函数、batch、rollout、top-k、学习率和 epoch 已一致，但数值精度与硬件路径尚非完全
+    同口径。
+  - 改进：将该项设为条件分支。只有 IMP-029 仍显示 OPD gap recovery 显著偏低，才先运行 fp32、
+    8-GPU、无 actor 参数/优化器 offload 的一步 full-shape probe；probe 成功后再决定是否完整训练。
+  - 验收：probe 记录峰值显存和阶段耗时且无 OOM/NaN；如启动完整训练，必须再做 31,744-token 独立
+    评测并与 bf16/offload 运行配对比较。不可仅凭训练 loss 判定复现。
+  - 进展：`opd_paper_exact_8gpu_probe.yaml`、`opd_paper_exact_8gpu.yaml` 已通过 dry-run；IMP-029 的
+    正式结果显示 OPD gap recovery 约 -0.74%，显著偏离论文“超过 80%”的报告，因此该条件分支已经
+    触发。2026-09-11 对既有 seed-42 OPD checkpoint 的审计发现，actor 的 17.77 亿参数和 Adam
+    `exp_avg/exp_avg_sq` 均为 BF16；279 步后抽查层仅 0.98%--1.21% 元素改变，`model.norm.weight`
+    改变比例为 0%。对应训练日志的 top-k overlap 也只从首步 72.13% 到末步 73.56%，前后 20 步均值
+    仅增加 1.31 pp。这构成“低学习率更新被 BF16 量化吞掉”的直接证据，而非单纯评测噪声。
+    当前 FP32 offload 和 8-GPU paper-exact probe 已统一改为 FP32并通过 dry-run。两卡 FP32/offload
+    一步 full-shape probe `20260911_112551_opd_fp32_offload_probe_seed42_693bda4` 已于 2026-09-11
+    以退出码 0 完成，单步训练约 512.6 秒、含初始化和保存总计 652.9 秒；actor/optimizer 两个 rank
+    checkpoint 完整，无 OOM/NaN。它证明低显存执行路径可行，但不是 8-GPU/no-offload 精确执行路径，
+    因而本条仍不勾选。FP32 修复、审计器和正式评测代码当前仍在脏工作树中；启动完整训练前须形成范围
+    清晰的 commit，确保 manifest 指向不可变实现。
+
+- [ ] **IMP-031（P1）让正式评测的运行中 shard 进度实时、原子地回写状态。**
+  - 发现日期：2026-09-11。
+  - 问题：论文口径评测执行到 `ropd_step279` 实际已有 38/48 shards、1458/2288 条生成落盘时，
+    `status.yaml` 仍停留在该模型开始时的 `completed_shards: 0`。`--status` 会交叉扫描产物并正确显示
+    38/48，但只读取 YAML 的监控器会误判进度。
+  - 改进：父进程等待 generation workers 时定期扫描原子 shard，并把当前模型、完成 shard/生成数和
+    最近进展时间原子写入状态；不要让多个 worker 并发写同一个 YAML。
+  - 验收：短 synthetic worker 测试中进度单调递增，完成态仍满足 IMP-027 的字段清理规则；worker
+    失败或 shard 损坏时，YAML 与 `--status` 扫描结果一致。
+  - 证据：`20260910_165940_opd_ropd_seed42_formal_evaluation` 在 2026-09-11 02:29 UTC 的状态核对。
+
+- [x] **IMP-032（P0）阻止低精度 actor 造成静默无效的 OPD 训练。**
+  - 发现日期：2026-09-11。
+  - 问题：RTX 适配配置曾把 `models.dtype` 改为 BF16，但当前 verl/FSDP 路径没有保留 FP32 master
+    parameters 或 FP32 Adam moments。进程可以正常训练和保存 checkpoint，却几乎不产生有效的
+    `1e-6` 参数更新，因此仅看退出码、梯度范数或 checkpoint 存在会误判复现成功。
+  - 改进：所有科学训练配置恢复 FP32；managed launcher 对非 FP32 actor 默认报错。只有纯 plumbing
+    smoke config 可通过 `allow_low_precision_actor_training=true` 显式豁免，同时输出不可用于效果结论
+    的警告。增加 checkpoint dtype/参数变化审计器与 top-k 奖励符号单测。
+  - 验收：论文精确和 4-GPU offload 配置 dry-run 均生成 FP32 actor；BF16 普通配置被拒绝、显式 smoke
+    豁免被警告；CPU 测试验证 top-k OPD 梯度使 reverse KL 下降。
+  - 完成证据：`scripts/run_opd_experiment.py`、`scripts/audit_opd_reproduction.py`、
+    `verl/tests/trainer/ppo/test_opd_reproduction_audit_on_cpu.py`；8 个 CPU 测试通过，paper-exact dry-run
+    显示 `model_dtype=fp32`、`ppo_max_token_len_per_gpu=32768`、reward microbatch 24，4-GPU offload
+    dry-run 显示 FP32 actor 与参数/优化器 offload 均启用。上述两卡 probe 的 checkpoint 审计进一步
+    确认 actor 17.77 亿参数和 Adam moments 全部为 FP32；一步后抽查 attention/MLP/norm 参数的变化率
+    为 99.95%--100%，平均绝对变化约 `0.74e-6`--`0.99e-6`，与旧 BF16 运行的 0%--1.21% 形成直接对照。
 
 ## 新增条目模板
 

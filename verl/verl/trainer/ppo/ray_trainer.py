@@ -51,7 +51,12 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
-from verl.trainer.ppo.robust_opd import DenseDiscreteROPDEngine, append_ropd_diagnostics
+from verl.trainer.ppo.robust_opd import (
+    DenseDiscreteROPDEngine,
+    append_ropd_diagnostics,
+    resolve_training_reward_mode,
+    select_training_rewards,
+)
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -1194,7 +1199,15 @@ class RayPPOTrainer:
                                         robust_result = self._dense_ropd_engine.compute(
                                             batch, self.global_steps, support=robust_support
                                         )
-                                    apply_to_training = bool(robust_opd_config.get("apply_to_training", False))
+                                    training_reward_mode = resolve_training_reward_mode(robust_opd_config)
+                                    selected_rewards, selection_metrics = select_training_rewards(
+                                        opd_scores=batch.batch["rm_scores"],
+                                        ropd_scores=robust_result.ropd_scores,
+                                        response_mask=batch.batch["response_mask"],
+                                        config=robust_opd_config,
+                                    )
+                                    apply_to_training = training_reward_mode != "opd"
+                                    robust_result.metrics.update(selection_metrics)
                                     metrics.update(robust_result.metrics)
                                     metrics["ropd/applied_to_training"] = float(apply_to_training)
                                     append_ropd_diagnostics(
@@ -1203,10 +1216,11 @@ class RayPPOTrainer:
                                         metrics=robust_result.metrics,
                                         samples=robust_result.samples,
                                         apply_to_training=apply_to_training,
+                                        training_reward_mode=training_reward_mode,
                                     )
                                     if apply_to_training:
                                         rm_scores = batch.batch["rm_scores"]
-                                        batch.batch["rm_scores"] = robust_result.ropd_scores.to(
+                                        batch.batch["rm_scores"] = selected_rewards.to(
                                             device=rm_scores.device, dtype=rm_scores.dtype
                                         )
                                     batch.batch.pop("opd_raw_rewards", None)

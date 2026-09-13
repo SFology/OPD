@@ -1,0 +1,11 @@
+extends: opd_paper_exact_8gpu.yaml
+
+experiment:
+  name: opd_paper_exact_8gpu_probe
+  description: One-step full-shape probe for the paper-default fp32 OPD reproduction.
+  tags: [opd, reproduction, paper-exact, fp32, 8gpu, probe]
+
+trainer:
+  total_training_steps: 1
+  save_freq: 1
+  max_actor_ckpt_to_keep: 1

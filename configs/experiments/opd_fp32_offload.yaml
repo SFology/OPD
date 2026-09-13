@@ -1,0 +1,37 @@
+extends: opd_default.yaml
+
+experiment:
+  name: opd_fp32_offload
+  description: Paper-objective FP32 OPD with CPU offload for 48-GB RTX GPUs.
+  tags: [opd, reproduction, fp32, offload, rtx6000-ada, auto-gpu]
+
+# These settings change execution/memory policy, not the OPD objective. Keeping
+# actor parameters and Adam moments in FP32 is mandatory at lr=1e-6.
+optimization:
+  max_tokens_per_gpu: 8192
+  param_offload: true
+  optimizer_offload: true
+
+rollout:
+  gpu_memory_utilization: 0.35
+
+reward_model:
+  micro_batch_size_per_gpu: 1
+  param_offload: true
+
+trainer:
+  # The tmux launcher overrides this with --gpu-count.
+  n_gpus_per_node: 2
+  save_freq: 10
+  max_actor_ckpt_to_keep: 3
+  is_plot: false
+
+logging:
+  swanlab_mode: local
+  dump_rollouts: false
+
+runtime:
+  # The tmux launcher selects a stable set at runtime.
+  cuda_visible_devices: null
+  min_free_gpu_memory_mb: null
+  cuda_launch_blocking: false

@@ -11,6 +11,10 @@ data:
 
 models:
   dtype: bfloat16
+  # This only checks end-to-end plumbing. BF16 trainable parameters are not
+  # valid for a scientific OPD result at lr=1e-6; the managed launcher requires
+  # this explicit opt-in so the smoke test cannot be mistaken for one.
+  allow_low_precision_actor_training: true
 
 optimization:
   mini_batch_size: 1

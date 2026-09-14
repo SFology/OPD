@@ -39,6 +39,9 @@ analysis = load_module(
 audit = load_module(
     "audit_eval_contamination", REPO_ROOT / "scripts" / "val" / "audit_eval_contamination.py"
 )
+runner = load_module(
+    "run_formal_evaluation", REPO_ROOT / "scripts" / "val" / "run_formal_evaluation.py"
+)
 
 
 def test_pass_at_k_uses_unbiased_estimator():
@@ -117,6 +120,101 @@ def test_update_status_can_clear_transient_progress_fields(tmp_path):
     assert "model" not in status
     assert "completed_shards" not in status
     assert "total_shards" not in status
+
+
+def test_reused_generations_require_exact_contract_and_preserve_pairing(tmp_path):
+    source_run = tmp_path / "source"
+    target_run = tmp_path / "target"
+    source_model_path = tmp_path / "model"
+    source_model_path.mkdir()
+    generation = {
+        "rollouts_per_prompt": 2,
+        "max_prompt_tokens": 32,
+        "max_new_tokens": 64,
+        "max_model_len": 96,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "repetition_penalty": 1.0,
+        "seed_base": 420000,
+        "dtype": "bfloat16",
+        "gpu_memory_utilization": 0.8,
+        "max_num_seqs": 4,
+        "enable_prefix_caching": True,
+    }
+    datasets = [{"name": "AIME24", "path": str(tmp_path / "test.parquet")}]
+    prompts = [
+        {
+            "prompt_id": "AIME24:0",
+            "dataset": "AIME24",
+            "dataset_index": 0,
+            "example_id": 0,
+            "messages": [{"role": "user", "content": "1+1?"}],
+            "ground_truth": "2",
+            "prompt_tokens_initial_tokenizer": 8,
+        }
+    ]
+    source_config = {
+        "models": [{"name": "old_name", "path": str(source_model_path)}],
+        "datasets": datasets,
+        "generation": generation,
+    }
+    common.write_yaml(source_run / "status.yaml", {"status": "completed"})
+    common.write_yaml(source_run / "config.yaml", source_config)
+    common.write_yaml(
+        source_run / "manifest.yaml",
+        {"models": [{"name": "old_name", "path": str(source_model_path)}]},
+    )
+    common.write_jsonl(source_run / "artifacts" / "prompt_manifest.jsonl", prompts)
+    for rollout in range(2):
+        common.write_jsonl(
+            common.generation_path(source_run, "old_name", "AIME24", rollout),
+            [
+                {
+                    "model": "old_name",
+                    "dataset": "AIME24",
+                    "prompt_id": "AIME24:0",
+                    "example_id": 0,
+                    "rollout": rollout,
+                    "seed": common.expected_seed(source_config, 0, 0, rollout),
+                    "response": "Answer: 2",
+                }
+            ],
+        )
+    target_config = {
+        "models": [
+            {
+                "name": "renamed_control",
+                "type": "huggingface",
+                "path": str(source_model_path),
+            }
+        ],
+        "datasets": datasets,
+        "generation": generation,
+        "reuse_generations": [
+            {
+                "target_model": "renamed_control",
+                "source_model": "old_name",
+                "source_run": str(source_run),
+            }
+        ],
+    }
+    common.write_yaml(target_run / "config.yaml", target_config)
+    common.write_jsonl(target_run / "artifacts" / "prompt_manifest.jsonl", prompts)
+    records = runner.import_reused_generations(target_run, target_config)
+    assert records[0]["request_seeds_validated"] is True
+    imported = common.read_jsonl(
+        common.generation_path(target_run, "renamed_control", "AIME24", 1)
+    )
+    assert imported[0]["model"] == "renamed_control"
+    assert imported[0]["seed"] == common.expected_seed(target_config, 0, 0, 1)
+    assert (target_run / "artifacts" / "reused_generations.yaml").exists()
+    resolved = runner.merge_models(target_run, target_config)
+    assert resolved["renamed_control"]["inference_path"] is None
+    assert resolved["renamed_control"]["generation_complete_without_loading"] is True
+
+    mismatched = {**target_config, "generation": {**generation, "temperature": 1.0}}
+    with pytest.raises(RuntimeError, match="Generation contract differs"):
+        runner.validate_generation_reuse(mismatched, prompts)
 
 
 def test_analysis_builds_complete_dashboard(tmp_path, monkeypatch):

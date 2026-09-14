@@ -15,6 +15,7 @@ from typing import Any
 
 import pandas as pd
 from formal_eval_common import (
+    expected_seed,
     generation_path,
     load_yaml,
     read_jsonl,
@@ -146,6 +147,194 @@ def build_prompt_manifest(run_dir: Path, config: dict[str, Any]) -> tuple[list[d
     return rows, dataset_records
 
 
+def validate_generation_reuse(
+    config: dict[str, Any], prompt_rows: list[dict]
+) -> list[dict[str, Any]]:
+    """Validate that frozen generations can be reused as exact paired controls."""
+
+    reuse_specs = config.get("reuse_generations") or []
+    if not reuse_specs:
+        return []
+    target_models = {item["name"]: item for item in config["models"]}
+    target_dataset_indices = {
+        item["name"]: index for index, item in enumerate(config["datasets"])
+    }
+    prompt_counts = Counter(row["dataset"] for row in prompt_rows)
+    prompt_ids = {
+        dataset: {row["prompt_id"] for row in prompt_rows if row["dataset"] == dataset}
+        for dataset in prompt_counts
+    }
+    targets_seen: set[str] = set()
+    source_cache: dict[Path, tuple[dict, dict, list[dict]]] = {}
+    records = []
+    for spec in reuse_specs:
+        target_model = str(spec["target_model"])
+        source_model = str(spec.get("source_model", target_model))
+        source_run = Path(spec["source_run"]).resolve()
+        if target_model not in target_models:
+            raise ValueError(f"Reuse target model is not configured: {target_model}")
+        if target_model in targets_seen:
+            raise ValueError(f"Duplicate reuse target model: {target_model}")
+        targets_seen.add(target_model)
+        if source_run not in source_cache:
+            source_status = load_yaml(source_run / "status.yaml")
+            if source_status.get("status") != "completed":
+                raise RuntimeError(f"Generation reuse source is not completed: {source_run}")
+            source_config = load_yaml(source_run / "config.yaml")
+            source_prompts = read_jsonl(source_run / "artifacts" / "prompt_manifest.jsonl")
+            if source_config["generation"] != config["generation"]:
+                raise RuntimeError(
+                    f"Generation contract differs from reuse source: {source_run}"
+                )
+            if source_prompts != prompt_rows:
+                raise RuntimeError(f"Prompt manifest differs from reuse source: {source_run}")
+            source_manifest = load_yaml(source_run / "manifest.yaml")
+            source_cache[source_run] = (source_config, source_manifest, source_prompts)
+        source_config, source_manifest, _ = source_cache[source_run]
+        source_models = {item["name"]: item for item in source_manifest["models"]}
+        if source_model not in source_models:
+            raise ValueError(f"Reuse source model is not present: {source_model}")
+        target_path = Path(target_models[target_model]["path"]).resolve()
+        source_path = Path(source_models[source_model]["path"]).resolve()
+        if target_path != source_path:
+            raise RuntimeError(
+                f"Model source differs for reused generations: target={target_path}, "
+                f"source={source_path}"
+            )
+        source_dataset_indices = {
+            item["name"]: index for index, item in enumerate(source_config["datasets"])
+        }
+        if source_dataset_indices != target_dataset_indices:
+            raise RuntimeError(f"Dataset order differs from reuse source: {source_run}")
+        shard_count = 0
+        generation_count = 0
+        for dataset in prompt_counts:
+            for rollout in range(int(config["generation"]["rollouts_per_prompt"])):
+                source_path = generation_path(source_run, source_model, dataset, rollout)
+                if not validate_generation_shard(
+                    source_path,
+                    model=source_model,
+                    dataset=dataset,
+                    rollout=rollout,
+                    expected_prompts=prompt_counts[dataset],
+                    expected_prompt_ids=prompt_ids[dataset],
+                ):
+                    raise RuntimeError(f"Invalid generation reuse shard: {source_path}")
+                rows = read_jsonl(source_path)
+                for row in rows:
+                    expected = expected_seed(
+                        config,
+                        target_dataset_indices[dataset],
+                        int(row["example_id"]),
+                        rollout,
+                    )
+                    if int(row.get("seed", -1)) != expected:
+                        raise RuntimeError(
+                            f"Seed mismatch in generation reuse shard: {source_path}"
+                        )
+                shard_count += 1
+                generation_count += len(rows)
+        records.append(
+            {
+                "target_model": target_model,
+                "source_model": source_model,
+                "source_run": str(source_run),
+                "source_config_sha256": sha256_file(source_run / "config.yaml"),
+                "source_prompt_manifest_sha256": sha256_file(
+                    source_run / "artifacts" / "prompt_manifest.jsonl"
+                ),
+                "shards": shard_count,
+                "generations": generation_count,
+                "generation_contract_exact_match": True,
+                "prompt_manifest_exact_match": True,
+                "model_source_exact_match": True,
+                "request_seeds_validated": True,
+            }
+        )
+    return records
+
+
+def import_reused_generations(run_dir: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Atomically copy validated control generations into a new evaluation run."""
+
+    prompt_rows = read_jsonl(run_dir / "artifacts" / "prompt_manifest.jsonl")
+    reuse_records = validate_generation_reuse(config, prompt_rows)
+    if not reuse_records:
+        return []
+    prompt_counts = Counter(row["dataset"] for row in prompt_rows)
+    prompt_ids = {
+        dataset: {row["prompt_id"] for row in prompt_rows if row["dataset"] == dataset}
+        for dataset in prompt_counts
+    }
+    total_shards = sum(int(record["shards"]) for record in reuse_records)
+    imported = 0
+    shard_records = []
+    update_status(
+        run_dir,
+        "running",
+        stage="reuse_generations",
+        reused_shards=0,
+        total_reused_shards=total_shards,
+    )
+    for record in reuse_records:
+        target_model = record["target_model"]
+        source_model = record["source_model"]
+        source_run = Path(record["source_run"])
+        for dataset in prompt_counts:
+            for rollout in range(int(config["generation"]["rollouts_per_prompt"])):
+                source = generation_path(source_run, source_model, dataset, rollout)
+                destination = generation_path(run_dir, target_model, dataset, rollout)
+                if validate_generation_shard(
+                    destination,
+                    model=target_model,
+                    dataset=dataset,
+                    rollout=rollout,
+                    expected_prompts=prompt_counts[dataset],
+                    expected_prompt_ids=prompt_ids[dataset],
+                ):
+                    imported += 1
+                    continue
+                if destination.exists():
+                    raise RuntimeError(
+                        f"Refusing to overwrite invalid reused-generation target: {destination}"
+                    )
+                rows = read_jsonl(source)
+                write_jsonl(destination, [{**row, "model": target_model} for row in rows])
+                if not validate_generation_shard(
+                    destination,
+                    model=target_model,
+                    dataset=dataset,
+                    rollout=rollout,
+                    expected_prompts=prompt_counts[dataset],
+                    expected_prompt_ids=prompt_ids[dataset],
+                ):
+                    raise RuntimeError(f"Imported generation shard is invalid: {destination}")
+                imported += 1
+                shard_records.append(
+                    {
+                        "target_model": target_model,
+                        "source_model": source_model,
+                        "dataset": dataset,
+                        "rollout": rollout,
+                        "rows": len(rows),
+                        "source": str(source),
+                        "source_sha256": sha256_file(source),
+                        "destination": str(destination),
+                        "destination_sha256": sha256_file(destination),
+                    }
+                )
+                update_status(
+                    run_dir,
+                    "running",
+                    stage="reuse_generations",
+                    reused_shards=imported,
+                    total_reused_shards=total_shards,
+                )
+    report = {"sources": reuse_records, "imported_shards": shard_records}
+    write_yaml(run_dir / "artifacts" / "reused_generations.yaml", report)
+    return reuse_records
+
+
 def snapshot_sources(run_dir: Path, config_path: Path) -> list[dict[str, Any]]:
     relative_paths = [
         Path("scripts/launch_opd_ropd_evaluation_tmux.sh"),
@@ -208,6 +397,7 @@ def prepare_run(run_dir: Path, config_path: Path) -> dict[str, Any]:
     )
     prompt_rows, datasets = build_prompt_manifest(run_dir, config)
     models = [validate_model_source(model) for model in config["models"]]
+    generation_reuse = validate_generation_reuse(config, prompt_rows)
     sources = snapshot_sources(run_dir, config_path)
     contamination = None
     contamination_config = config.get("contamination_audit")
@@ -240,6 +430,7 @@ def prepare_run(run_dir: Path, config_path: Path) -> dict[str, Any]:
         "git": git_metadata(),
         "datasets": datasets,
         "models": models,
+        "generation_reuse": generation_reuse,
         "source_snapshot": sources,
         "contamination_audit": contamination,
         "unique_prompts": len(prompt_rows),
@@ -273,6 +464,17 @@ def merge_models(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     resolved = {}
     for model in config["models"]:
         source = Path(model["path"]).resolve()
+        if not missing_shards(
+            run_dir, config, model["name"], quarantine_invalid=False
+        ):
+            resolved[model["name"]] = {
+                "type": model["type"],
+                "source_path": str(source),
+                "source_run": model.get("source_run"),
+                "inference_path": None,
+                "generation_complete_without_loading": True,
+            }
+            continue
         if model["type"] == "huggingface":
             inference_path = source
         else:
@@ -464,6 +666,30 @@ def run_generation(run_dir: Path, config: dict[str, Any], model: str) -> None:
             )
             processes.append((process, log, log_path))
         failures = []
+        last_completed = completed
+        status_poll_seconds = int(config["parallel"].get("status_poll_seconds", 30))
+        while True:
+            all_done = all(process.poll() is not None for process, _, _ in processes)
+            current_missing = missing_shards(
+                run_dir, config, model, quarantine_invalid=False
+            )
+            current_completed = total_shards - len(current_missing)
+            progress_fields: dict[str, Any] = {"heartbeat_at_utc": utc_now()}
+            if current_completed != last_completed:
+                progress_fields["last_progress_at_utc"] = utc_now()
+                last_completed = current_completed
+            update_status(
+                run_dir,
+                "running",
+                stage=f"generation:{model}",
+                model=model,
+                completed_shards=current_completed,
+                total_shards=total_shards,
+                **progress_fields,
+            )
+            if all_done:
+                break
+            time.sleep(status_poll_seconds)
         for process, log, log_path in processes:
             return_code = process.wait()
             log.close()
@@ -540,8 +766,23 @@ def main() -> None:
             run_dir,
             "running",
             stage="merge",
-            clear_fields=("model", "completed_shards", "total_shards"),
+            clear_fields=(
+                "model",
+                "completed_shards",
+                "total_shards",
+                "reused_shards",
+                "total_reused_shards",
+                "heartbeat_at_utc",
+                "last_progress_at_utc",
+            ),
             **start_fields,
+        )
+        import_reused_generations(run_dir, config)
+        update_status(
+            run_dir,
+            "running",
+            stage="merge",
+            clear_fields=("reused_shards", "total_reused_shards"),
         )
         merge_models(run_dir, config)
         for model in config["models"]:
@@ -550,7 +791,13 @@ def main() -> None:
             run_dir,
             "running",
             stage="analysis",
-            clear_fields=("model", "completed_shards", "total_shards"),
+            clear_fields=(
+                "model",
+                "completed_shards",
+                "total_shards",
+                "heartbeat_at_utc",
+                "last_progress_at_utc",
+            ),
         )
         analysis_log = run_dir / "logs" / "analysis.log"
         with analysis_log.open("w", encoding="utf-8") as log:
@@ -572,7 +819,15 @@ def main() -> None:
             run_dir,
             "completed",
             stage="complete",
-            clear_fields=("model", "completed_shards", "total_shards", "error", "traceback"),
+            clear_fields=(
+                "model",
+                "completed_shards",
+                "total_shards",
+                "heartbeat_at_utc",
+                "last_progress_at_utc",
+                "error",
+                "traceback",
+            ),
             finished_at_utc=utc_now(),
             dashboard=str(run_dir / "results" / "figures" / "dashboard.html"),
         )

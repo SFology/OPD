@@ -228,6 +228,10 @@
     `143 prompts / 6864 generations / 48 shards per model`，最长 prompt 为 413 token。随后完整任务自动
     选择 GPU 2/3，于 2026-09-10 11:42--13:44 UTC 在约 2 小时 2 分钟内以退出码 0 完成；三模型均为
     48/48 shards、2288/2288 条，分析结果与看板齐全，断点/原子 shard 机制未发现损坏产物。
+    2026-09-14 又为 FP32 复现评测增加冻结 generation 复用：只有生成配置、完整 prompt manifest、
+    模型源路径、全部 shard 和逐请求 seed 均严格匹配时，才把既有控制输出原子导入新 run；真实数据
+    preflight 已验证可复用 initial/teacher/旧 BF16 OPD 共 144 shards、6864 条，仅需为新 FP32 OPD
+    生成 48 shards、2288 条，避免无信息的重复计算。
 
 ## 规模扩展与算力标定
 
@@ -281,6 +285,10 @@
   - 验收：至少一个短 smoke run 在保存最终 checkpoint 后无上述 traceback；重复 finalize 不报错；
     真正的数据 worker 异常仍能传递非零退出码并写入 `status.yaml`。
   - 证据：上述两个完整 run 的 `logs/train.log` 尾部；修复 commit 待补充。
+    2026-09-14 完成的 FP32/offload 原始 OPD run
+    `20260913_053418_opd_fp32_offload_seed42_216ed12` 在最终 checkpoint 已完整写入且外层退出码为 0 后，
+    仍复现 `cannot join current thread` 和预期关闭阶段 DataLoader worker 收到 `Killed` 的 traceback；
+    再次确认这是独立的退出清理问题，训练产物本身不受影响。
 
 - [ ] **IMP-025（P0）用更新幅度匹配的对照分离“可靠性门控”和“整体缩小学习信号”。**
   - 发现日期：2026-09-10。
@@ -364,8 +372,15 @@
     一步 full-shape probe `20260911_112551_opd_fp32_offload_probe_seed42_693bda4` 已于 2026-09-11
     以退出码 0 完成，单步训练约 512.6 秒、含初始化和保存总计 652.9 秒；actor/optimizer 两个 rank
     checkpoint 完整，无 OOM/NaN。它证明低显存执行路径可行，但不是 8-GPU/no-offload 精确执行路径，
-    因而本条仍不勾选。FP32 修复、审计器和正式评测代码已提交为 `d53852f`；完整训练应从该提交或其
-    仅含文档更新的后继提交启动，确保 manifest 指向不可变实现。
+    因而本条仍不勾选。FP32 修复、审计器和正式评测代码已提交为 `d53852f`。两卡 FP32/offload 完整
+    原始 OPD run `20260913_053418_opd_fp32_offload_seed42_216ed12` 已从后继提交 `216ed12` 完成
+    279/279 步，退出码 0，总耗时 117881.4 秒（约 32.74 小时），无 OOM、NaN 或 NCCL 错误；最终
+    `global_step_279` 的 model/optimizer 两个 rank shard、extra state、tokenizer/config 和 `data.pt`
+    均完整。下一验收步骤是对该 FP32 checkpoint 运行固定 31,744-token 独立评测并与初始学生及旧
+    BF16 checkpoint 配对比较；在此之前不可仅凭训练日志宣称复现论文提升，故本条仍不勾选。
+    2026-09-14 已新增 `opd_fp32_seed42_paper_aligned_evaluation.yaml`，主要比较预注册为
+    `opd_fp32_step279-initial_student`，并保留 FP32-vs-BF16 与教师 gap recovery；真实 preflight 确认
+    143 题、每题 16 次、总计 9152 条，其中 6864 条严格复用、仅 2288 条需要新增生成。待用户启动。
 
 - [ ] **IMP-031（P1）让正式评测的运行中 shard 进度实时、原子地回写状态。**
   - 发现日期：2026-09-11。
@@ -377,6 +392,9 @@
   - 验收：短 synthetic worker 测试中进度单调递增，完成态仍满足 IMP-027 的字段清理规则；worker
     失败或 shard 损坏时，YAML 与 `--status` 扫描结果一致。
   - 证据：`20260910_165940_opd_ropd_seed42_formal_evaluation` 在 2026-09-11 02:29 UTC 的状态核对。
+  - 进展：2026-09-14 父进程已改为生成期间每 30 秒扫描原子 shard 并回写
+    `completed_shards/total_shards`、heartbeat 和最近进展时间；结束阶段会清理这些瞬态字段。CPU
+    测试与真实复用 preflight 均通过，待本次 FP32 正式评测提供实际长任务证据后决定是否勾选。
 
 - [x] **IMP-032（P0）阻止低精度 actor 造成静默无效的 OPD 训练。**
   - 发现日期：2026-09-11。

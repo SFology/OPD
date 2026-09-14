@@ -35,7 +35,8 @@ export OPD_STORAGE_ROOT="/attached/remote-home1/${USER}/opd"
 export OPD_MODEL_DIR="$OPD_STORAGE_ROOT/models"
 
 if [[ -z "$RUN_DIR" ]]; then
-    RUN_ID="$(date -u +%Y%m%d_%H%M%S)_opd_ropd_seed42_formal_evaluation"
+    CONFIG_STEM="$(basename "${CONFIG%.yaml}")"
+    RUN_ID="$(date -u +%Y%m%d_%H%M%S)_${CONFIG_STEM}"
     RUN_DIR="$OPD_STORAGE_ROOT/evaluations/$RUN_ID"
 fi
 if [[ -z "$SESSION" ]]; then

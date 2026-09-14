@@ -1,0 +1,100 @@
+schema_version: 1
+
+experiment:
+  name: opd_fp32_seed42_paper_aligned_evaluation
+  output_root: "${OPD_STORAGE_ROOT}/evaluations"
+  description: >-
+    Paper-aligned 31,744-token paired evaluation of the initial student,
+    JustRL teacher, legacy BF16 OPD step 279, and effective FP32 OPD step 279.
+
+models:
+  - name: initial_student
+    type: huggingface
+    path: "${OPD_MODEL_DIR}/DeepSeek-R1-Distill-Qwen-1.5B"
+  - name: teacher_justrl
+    type: huggingface
+    path: "${OPD_MODEL_DIR}/JustRL-DeepSeek-1.5B"
+  - name: opd_bf16_step279
+    type: fsdp_checkpoint
+    source_run: >-
+      ${OPD_STORAGE_ROOT}/experiments/20260906_045836_opd_dense_discrete_lcb_opd_seed42_c200eae
+    path: >-
+      ${OPD_STORAGE_ROOT}/experiments/20260906_045836_opd_dense_discrete_lcb_opd_seed42_c200eae/checkpoints/global_step_279/actor
+  - name: opd_fp32_step279
+    type: fsdp_checkpoint
+    source_run: >-
+      ${OPD_STORAGE_ROOT}/experiments/20260913_053418_opd_fp32_offload_seed42_216ed12
+    path: >-
+      ${OPD_STORAGE_ROOT}/experiments/20260913_053418_opd_fp32_offload_seed42_216ed12/checkpoints/global_step_279/actor
+
+# These three controls were already generated with exactly the contract below.
+# The runner validates source completion, model paths, prompt manifests, every
+# shard, and every request seed before atomically importing them. Only the new
+# FP32 checkpoint requires GPU generation.
+reuse_generations:
+  - target_model: initial_student
+    source_model: initial_student
+    source_run: >-
+      ${OPD_STORAGE_ROOT}/evaluations/20260910_165940_opd_ropd_seed42_formal_evaluation
+  - target_model: teacher_justrl
+    source_model: teacher_justrl
+    source_run: >-
+      ${OPD_STORAGE_ROOT}/evaluations/20260910_165940_opd_ropd_seed42_formal_evaluation
+  - target_model: opd_bf16_step279
+    source_model: opd_step279
+    source_run: >-
+      ${OPD_STORAGE_ROOT}/evaluations/20260910_165940_opd_ropd_seed42_formal_evaluation
+
+datasets:
+  - name: AIME24
+    path: "${OPD_ROOT}/datasets/test_data/AIME24/test.parquet"
+  - name: AIME25
+    path: "${OPD_ROOT}/datasets/test_data/AIME25/test.parquet"
+  - name: AMC23
+    path: "${OPD_ROOT}/datasets/test_data/AMC23/test.parquet"
+
+generation:
+  rollouts_per_prompt: 16
+  max_prompt_tokens: 1024
+  max_new_tokens: 31744
+  max_model_len: 32768
+  temperature: 0.7
+  top_p: 0.95
+  repetition_penalty: 1.0
+  seed_base: 420000
+  # All checkpoints use the same inference precision; FP32 here refers to the
+  # trainable parameters and optimizer used during training.
+  dtype: bfloat16
+  gpu_memory_utilization: 0.85
+  max_num_seqs: 32
+  enable_prefix_caching: true
+
+analysis:
+  primary_comparison: [opd_fp32_step279, initial_student]
+  pass_k: [1, 4, 8, 16]
+  comparisons:
+    - [teacher_justrl, initial_student]
+    - [opd_bf16_step279, initial_student]
+    - [opd_fp32_step279, initial_student]
+    - [opd_fp32_step279, opd_bf16_step279]
+  plot_comparisons:
+    - [opd_bf16_step279, initial_student]
+    - [opd_fp32_step279, initial_student]
+    - [opd_fp32_step279, opd_bf16_step279]
+  gap_recovery:
+    student: initial_student
+    teacher: teacher_justrl
+    trained_models: [opd_bf16_step279, opd_fp32_step279]
+  bootstrap_samples: 10000
+  confidence_level: 0.95
+  bootstrap_seed: 424242
+
+parallel:
+  min_free_mb: 42000
+  max_utilization: 10
+  gpu_stability_seconds: 15
+  gpu_poll_seconds: 60
+  gpu_wait_seconds: 604800
+  status_poll_seconds: 30
+  max_gpus: null
+  retries: 3

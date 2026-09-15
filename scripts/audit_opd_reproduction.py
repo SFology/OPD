@@ -192,7 +192,32 @@ def safetensor_file_for(model_dir: Path, name: str) -> Path:
     return model_dir / index["weight_map"][name]
 
 
-def checkpoint_precision_audit(actor_dir: Path, initial_model: Path) -> dict[str, Any]:
+def summarize_parameter_changes(changes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    valid = [item for item in changes.values() if "error" not in item]
+    total_numel = sum(int(item["numel"]) for item in valid)
+    changed_elements = sum(int(item["changed_elements"]) for item in valid)
+    delta_sq_sum = sum(float(item["delta_l2"]) ** 2 for item in valid)
+    source_sq_sum = sum(float(item["source_l2"]) ** 2 for item in valid)
+    absolute_delta_sum = sum(float(item["absolute_delta_mean"]) * int(item["numel"]) for item in valid)
+    return {
+        "parameter_count": len(valid),
+        "numel": total_numel,
+        "changed_elements": changed_elements,
+        "changed_fraction": changed_elements / max(total_numel, 1),
+        "absolute_delta_mean": absolute_delta_sum / max(total_numel, 1),
+        "delta_l2": math.sqrt(delta_sq_sum),
+        "source_l2": math.sqrt(source_sq_sum),
+        "relative_delta_l2": math.sqrt(delta_sq_sum / source_sq_sum) if source_sq_sum else math.nan,
+        "delta_rms": math.sqrt(delta_sq_sum / max(total_numel, 1)),
+    }
+
+
+def checkpoint_precision_audit(
+    actor_dir: Path,
+    initial_model: Path,
+    *,
+    include_optimizer: bool = True,
+) -> dict[str, Any]:
     model_files = sorted(actor_dir.glob("model_world_size_*_rank_*.pt"))
     optimizer_files = sorted(actor_dir.glob("optim_world_size_*_rank_*.pt"))
     if not model_files:
@@ -227,17 +252,25 @@ def checkpoint_precision_audit(actor_dir: Path, initial_model: Path) -> dict[str
             }
             continue
         changed = checkpoint_tensor != source_tensor
-        delta = (checkpoint_tensor.float() - source_tensor.float()).abs()
+        signed_delta = checkpoint_tensor.float() - source_tensor.float()
+        delta = signed_delta.abs()
         changes[name] = {
             "numel": source_tensor.numel(),
             "changed_elements": int(changed.sum().item()),
             "changed_fraction": changed.float().mean().item(),
             "absolute_delta_mean": delta.mean().item(),
             "absolute_delta_max": delta.max().item(),
+            "delta_l2": float(torch.linalg.vector_norm(signed_delta)),
+            "source_l2": float(torch.linalg.vector_norm(source_tensor.float())),
+            "relative_delta_l2": float(
+                torch.linalg.vector_norm(signed_delta)
+                / torch.linalg.vector_norm(source_tensor.float()).clamp_min(1e-30)
+            ),
+            "delta_rms": float(torch.sqrt(torch.mean(signed_delta.square()))),
         }
 
     optimizer_numel_by_dtype: Counter[str] = Counter()
-    if optimizer_files:
+    if optimizer_files and include_optimizer:
         optimizer = torch.load(optimizer_files[0], map_location="cpu", weights_only=False)
         tensor_inventory(optimizer, optimizer_numel_by_dtype)
         del optimizer
@@ -250,6 +283,7 @@ def checkpoint_precision_audit(actor_dir: Path, initial_model: Path) -> dict[str
         "rank0_model_numel_by_dtype": dict(model_numel_by_dtype),
         "rank0_optimizer_numel_by_dtype": dict(optimizer_numel_by_dtype),
         "representative_parameter_changes": changes,
+        "representative_parameter_aggregate": summarize_parameter_changes(changes),
     }
 
 
@@ -280,6 +314,13 @@ def print_report(report: dict[str, Any]) -> None:
         print("\nCheckpoint precision:")
         print(f"  model numel by dtype (rank 0): {precision['rank0_model_numel_by_dtype']}")
         print(f"  optimizer numel by dtype (rank 0): {precision['rank0_optimizer_numel_by_dtype']}")
+        aggregate = precision["representative_parameter_aggregate"]
+        print(
+            "  representative aggregate: "
+            f"relative_l2={aggregate['relative_delta_l2']:.6g}, "
+            f"delta_rms={aggregate['delta_rms']:.6g}, "
+            f"changed={aggregate['changed_fraction']:.4%}"
+        )
         for name, item in precision["representative_parameter_changes"].items():
             if "error" in item:
                 print(f"  {name}: {item['error']}")

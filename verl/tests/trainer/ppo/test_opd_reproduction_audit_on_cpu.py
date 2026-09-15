@@ -23,6 +23,10 @@ def load_script(name: str, relative_path: str):
 
 launcher = load_script("run_opd_experiment_for_test", "scripts/run_opd_experiment.py")
 audit = load_script("audit_opd_reproduction_for_test", "scripts/audit_opd_reproduction.py")
+lambda_analysis = load_script(
+    "analyze_lcb_lambda_diagnostic_for_test",
+    "scripts/analyze_lcb_lambda_diagnostic.py",
+)
 
 
 def test_low_precision_actor_requires_explicit_non_scientific_opt_in(capsys):
@@ -110,3 +114,58 @@ def test_topk_opd_reward_sign_reduces_reverse_kl():
     updated_log_probs = torch.log_softmax(student_logits.detach(), dim=-1)
     after = torch.sum(updated_log_probs.exp() * (updated_log_probs - teacher_log_probs)).item()
     assert after < before
+
+
+def test_representative_parameter_change_summary_is_weighted_by_numel():
+    changes = {
+        "a": {
+            "numel": 3,
+            "changed_elements": 3,
+            "absolute_delta_mean": 2.0,
+            "delta_l2": 3.0,
+            "source_l2": 4.0,
+        },
+        "b": {
+            "numel": 1,
+            "changed_elements": 0,
+            "absolute_delta_mean": 4.0,
+            "delta_l2": 4.0,
+            "source_l2": 3.0,
+        },
+        "bad": {"error": "shape mismatch"},
+    }
+
+    result = audit.summarize_parameter_changes(changes)
+
+    assert result["parameter_count"] == 2
+    assert result["numel"] == 4
+    assert result["changed_fraction"] == pytest.approx(0.75)
+    assert result["absolute_delta_mean"] == pytest.approx(2.5)
+    assert result["delta_l2"] == pytest.approx(5.0)
+    assert result["source_l2"] == pytest.approx(5.0)
+    assert result["relative_delta_l2"] == pytest.approx(1.0)
+    assert result["delta_rms"] == pytest.approx(2.5)
+
+
+def test_lambda_diagnostic_summary_aggregates_steps_and_normalizes_rms():
+    fields = {
+        "trust_mean": [0.5, 0.7],
+        "zero_trust_fraction": [0.4, 0.2],
+        "supported_trust_mean": [0.4, 0.6],
+        "supported_zero_trust_fraction": [0.5, 0.3],
+        "selected_token_rms": [1.0, 1.4],
+        "effective_abs_reward_mass_fraction": [0.6, 0.8],
+        "unsupported_selected_abs_mass_fraction": [0.2, 0.4],
+    }
+    rows = []
+    for index in range(2):
+        row = {"ropd/training_opd_token_rms": 2.0}
+        row.update({f"ropd/cf_lambda_0p1/{key}": values[index] for key, values in fields.items()})
+        rows.append(row)
+
+    opd_rms, summaries = lambda_analysis.summarize_lambda_grid(rows, [0.1])
+
+    assert opd_rms == pytest.approx(2.0)
+    assert summaries[0]["trust_mean"] == pytest.approx(0.6)
+    assert summaries[0]["selected_token_rms"] == pytest.approx(1.2)
+    assert summaries[0]["selected_token_rms_relative_to_opd"] == pytest.approx(0.6)

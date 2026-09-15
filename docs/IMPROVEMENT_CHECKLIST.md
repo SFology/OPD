@@ -108,6 +108,10 @@
     lambda 网格的反事实 trust/RMS，并按“有邻居/无邻居”分解 reward RMS、梯度贡献和参数更新；无邻居
     回退应作为独立消融，不能把“缺少证据”默认解释为“教师可靠”。在完成这些诊断及 IMP-008/012 的
     语义与正确性校准前，不启动默认 `lambda=1` 的完整 ROPD 训练。
+  - 下一实验准备（2026-09-15）：新增独立 seed-44 FP32 OPD 诊断配置，在同一次已完成的邻域前向上对
+    预注册 `lambda=[0,0.003,0.01,0.03,0.1,0.3,1]` 计算全量反事实 trust、零信任率、selected RMS、
+    绝对 reward mass 保留率及无邻居回退占比；这些统计不改变 actor update，也不读取 correctness 标签。
+    启动器会先完成四臂 checkpoint 参数更新审计，再运行该 5-step 诊断并自动汇总结果。
 
 - [ ] **IMP-008（P0）审计稠密离散邻域的语义有效性。**
   - 问题：同 prompt、相近进度和双球约束并不自动保证两个推理状态语义等价；错误邻居会把正常决策变化
@@ -331,6 +335,8 @@
     对照达到预期；但平均 actor grad norm 分别为 1.9590/0.8295/0.3166/0.7545，说明 reward RMS
     匹配不等于梯度匹配。下一步必须审计四个 step-5 checkpoint 的真实参数变化，并先解决 IMP-007 的
     `lambda=1` 门控塌缩，不能直接启动完整训练。
+    已准备可恢复的四臂 checkpoint 审计器，按代表性 attention/MLP/norm 参数报告真实 delta RMS、L2
+    相对变化及相对 OPD 比率；审计属于下一诊断启动器的第一阶段，尚待实际运行，故本条不勾选。
   - 证据：seed 42 配对 run 的 `metrics/ropd_step_metrics.jsonl` 与 `logs/train.log`；实现和 probe 配置
     位于 `verl/verl/trainer/ppo/robust_opd.py`、`configs/experiments/opd_update_matched_seed43_*.yaml`。
 
@@ -454,6 +460,8 @@
   - 验收：合成测试验证未变化时所有 arm 使用同一 revision，文档或代码发生提交/修改时在下一 arm 前
     明确停止；run manifest 记录冻结 revision 和校验结果。
   - 证据：本次 `runs.tsv` 与 `git diff 3c2300c..2a1bb46`；实现待补充。
+  - 进展：update-matched 四臂启动器和新 LCB 诊断启动器均已在起始时要求 clean worktree、冻结 HEAD，
+    并在每个后续阶段前复核；Shell 语法测试通过。仍需补充模拟中途变更的自动化测试后再勾选。
 
 ## 新增条目模板
 

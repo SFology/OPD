@@ -126,6 +126,14 @@ def validate_dense_discrete_config(config: dict[str, Any]) -> None:
             raise ValueError("robust_opd.normalization_epsilon must be positive")
         if float(config.get("max_normalization_scale", 20.0)) < 1.0:
             raise ValueError("robust_opd.max_normalization_scale must be >= 1")
+        diagnostic_lambdas = config.get("diagnostic_lambdas", [])
+        if not isinstance(diagnostic_lambdas, (list, tuple)):
+            raise ValueError("robust_opd.diagnostic_lambdas must be a list")
+        parsed_lambdas = [float(value) for value in diagnostic_lambdas]
+        if any(not math.isfinite(value) or value < 0 for value in parsed_lambdas):
+            raise ValueError("robust_opd.diagnostic_lambdas must contain finite non-negative values")
+        if len(set(parsed_lambdas)) != len(parsed_lambdas):
+            raise ValueError("robust_opd.diagnostic_lambdas must not contain duplicates")
 
 
 def resolve_training_reward_mode(config: dict[str, Any]) -> str:
@@ -280,6 +288,68 @@ def calibrate_fixed_opd_scale(
         "ratio_min": min(ratios),
         "ratio_max": max(ratios),
     }
+
+
+def _lambda_metric_slug(value: float) -> str:
+    return f"{value:.12g}".replace("-", "m").replace(".", "p").replace("+", "")
+
+
+def counterfactual_lcb_metrics(
+    *,
+    anchor_reward: torch.Tensor,
+    risk: torch.Tensor,
+    has_neighbor: torch.Tensor,
+    response_mask: torch.Tensor,
+    token_opd: torch.Tensor,
+    epsilon: float,
+    lambdas: list[float],
+) -> dict[str, float]:
+    """Evaluate a lambda grid on already-computed risk without another model forward."""
+
+    mask = response_mask.bool()
+    supported = has_neighbor[mask]
+    anchor = anchor_reward[mask]
+    valid_risk = risk[mask]
+    token = token_opd
+    if anchor.shape != token.shape or supported.shape != token.shape:
+        raise ValueError("counterfactual LCB tensors are not aligned")
+    base_abs_mass = token.abs().sum().clamp_min(1e-12)
+    result: dict[str, float] = {}
+    for value in lambdas:
+        robust_magnitude = (anchor.abs() - value * valid_risk).clamp_min(0.0)
+        trust = torch.where(
+            anchor.abs() > epsilon,
+            robust_magnitude / anchor.abs(),
+            torch.zeros_like(anchor),
+        )
+        trust = torch.where(supported, trust, torch.ones_like(trust)).clamp(0.0, 1.0)
+        selected = token * trust
+        selected_abs_mass = selected.abs().sum()
+        prefix = f"ropd/cf_lambda_{_lambda_metric_slug(value)}"
+        result[f"{prefix}/trust_mean"] = float(trust.mean()) if trust.numel() else 0.0
+        result[f"{prefix}/zero_trust_fraction"] = (
+            float((trust <= 1e-8).float().mean()) if trust.numel() else 1.0
+        )
+        result[f"{prefix}/selected_token_rms"] = (
+            float(torch.sqrt(torch.mean(selected.square()))) if selected.numel() else 0.0
+        )
+        result[f"{prefix}/effective_abs_reward_mass_fraction"] = float(
+            selected_abs_mass / base_abs_mass
+        )
+        if bool(supported.any()):
+            supported_trust = trust[supported]
+            result[f"{prefix}/supported_trust_mean"] = float(supported_trust.mean())
+            result[f"{prefix}/supported_zero_trust_fraction"] = float(
+                (supported_trust <= 1e-8).float().mean()
+            )
+        else:
+            result[f"{prefix}/supported_trust_mean"] = float("nan")
+            result[f"{prefix}/supported_zero_trust_fraction"] = float("nan")
+        unsupported_abs_mass = selected[~supported].abs().sum()
+        result[f"{prefix}/unsupported_selected_abs_mass_fraction"] = float(
+            unsupported_abs_mass / selected_abs_mass.clamp_min(1e-12)
+        )
+    return result
 
 
 def _model_fingerprint(model_path: Path, projection_dim: int, seed: int, projection_method: str) -> str:
@@ -775,6 +845,19 @@ def compute_dense_discrete_lcb(
         ("absolute_reward_reduction", token_opd.abs() - token_lcb.abs()),
     ):
         metrics.update({f"ropd/{prefix}_{name}": value for name, value in _quantiles(values).items()})
+    diagnostic_lambdas = [float(value) for value in config.get("diagnostic_lambdas", [])]
+    if diagnostic_lambdas:
+        metrics.update(
+            counterfactual_lcb_metrics(
+                anchor_reward=anchor_reward,
+                risk=risk,
+                has_neighbor=has_neighbor,
+                response_mask=mask,
+                token_opd=token_opd,
+                epsilon=epsilon,
+                lambdas=diagnostic_lambdas,
+            )
+        )
     if torch.any(robust_scores[mask].abs() > original_scores[mask].abs() + 1e-6):
         raise AssertionError("LCB shrinkage increased an OPD reward magnitude")
 

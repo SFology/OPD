@@ -121,6 +121,25 @@ export OPD_ROOT=$REPO
 export OPD_STORAGE_ROOT=$STORAGE_ROOT
 export OPD_MODEL_DIR=$MODEL_DIR
 
+FROZEN_HEAD=$(git rev-parse HEAD)
+if [[ -n "$(git status --porcelain)" ]]; then
+    echo "Repository must be clean before a paired multi-arm run" >&2
+    git status --short >&2
+    exit 1
+fi
+printf '%s\n' "$FROZEN_HEAD" > "$ORCH_DIR/frozen_git_revision.txt"
+
+assert_frozen_revision() {
+    local current_head
+    current_head=$(git rev-parse HEAD)
+    if [[ "$current_head" != "$FROZEN_HEAD" || -n "$(git status --porcelain)" ]]; then
+        echo "Repository changed after orchestration started; refusing the next paired arm" >&2
+        echo "frozen=$FROZEN_HEAD current=$current_head" >&2
+        git status --short >&2
+        exit 1
+    fi
+}
+
 if pgrep -u "$(id -u)" -af 'verl[.]trainer[.]main_ppo' >/dev/null; then
     echo "Another OPD/verl training process is already running for this user" >&2
     pgrep -u "$(id -u)" -af 'verl[.]trainer[.]main_ppo' >&2 || true
@@ -185,6 +204,7 @@ run_arm() {
     local extra=("$@")
     local probe_overrides=()
     local attempt=0 exit_code=0 attempt_log= run_dir=
+    assert_frozen_revision
     if [[ "$MODE" == probe ]]; then
         probe_overrides=(
             --set "experiment.name=${label}_probe${PROBE_STEPS}"

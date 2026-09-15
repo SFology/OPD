@@ -1,0 +1,20 @@
+extends: opd_update_matched_seed43_opd.yaml
+
+experiment:
+  name: opd_lcb_lambda_diagnostic
+  description: FP32 OPD trajectory with full-state counterfactual LCB lambda diagnostics.
+  tags: [opd, lcb-opd, fp32, lambda-grid, diagnostic, label-free, seed44]
+  seed: 44
+
+distillation:
+  robust_opd:
+    training_reward_mode: opd
+    apply_to_training: false
+    # Pre-registered before this run. These counterfactuals reuse the exact
+    # anchor/neighbor log-probs and never affect the OPD actor update.
+    diagnostic_lambdas: [0.0, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0]
+
+trainer:
+  total_training_steps: 5
+  save_freq: 5
+  max_actor_ckpt_to_keep: 1

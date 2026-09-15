@@ -26,6 +26,7 @@ from verl.trainer.ppo.robust_opd import (
     calibrate_fixed_opd_scale,
     compute_dense_discrete_lcb,
     compute_dense_discrete_ropd,
+    counterfactual_lcb_metrics,
     load_projected_embedding_table,
     prepare_dense_discrete_lcb_support,
     resolve_training_reward_mode,
@@ -444,3 +445,31 @@ def test_scale_calibration_rejects_non_opd_or_expansive_records() -> None:
     expansive = {**base, "training_reward_mode": "opd", "ropd/training_ropd_token_rms": 20.1}
     with pytest.raises(ValueError, match="exceeds maximum"):
         calibrate_fixed_opd_scale([expansive], minimum_steps=1)
+
+
+def test_counterfactual_lambda_grid_decomposes_supported_reward_mass() -> None:
+    metrics = counterfactual_lcb_metrics(
+        anchor_reward=torch.tensor([[1.0, 1.0, 2.0]]),
+        risk=torch.tensor([[0.5, 2.0, 99.0]]),
+        has_neighbor=torch.tensor([[True, True, False]]),
+        response_mask=torch.ones(1, 3, dtype=torch.bool),
+        token_opd=torch.tensor([2.0, 4.0, 8.0]),
+        epsilon=1e-6,
+        lambdas=[0.0, 1.0],
+    )
+
+    assert metrics["ropd/cf_lambda_0/trust_mean"] == pytest.approx(1.0)
+    assert metrics["ropd/cf_lambda_0/selected_token_rms"] == pytest.approx(
+        torch.sqrt(torch.tensor((4.0 + 16.0 + 64.0) / 3.0)).item()
+    )
+    assert metrics["ropd/cf_lambda_1/supported_trust_mean"] == pytest.approx(0.25)
+    assert metrics["ropd/cf_lambda_1/supported_zero_trust_fraction"] == pytest.approx(0.5)
+    assert metrics["ropd/cf_lambda_1/effective_abs_reward_mass_fraction"] == pytest.approx(9 / 14)
+    assert metrics["ropd/cf_lambda_1/unsupported_selected_abs_mass_fraction"] == pytest.approx(8 / 9)
+
+
+def test_counterfactual_lambda_grid_validation_rejects_bad_values() -> None:
+    config = _lcb_config()
+    config["diagnostic_lambdas"] = [0.1, -0.2]
+    with pytest.raises(ValueError, match="finite non-negative"):
+        validate_dense_discrete_config(config)

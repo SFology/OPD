@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -452,11 +453,30 @@ def main() -> int:
     )
     annotations = load_all_annotations(run_dir)
     payload = write_outputs(run_dir, config, items, membership, annotations)
+    repository = Path(__file__).resolve().parents[2]
+    analysis_revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    analysis_dirty = bool(
+        subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
     complete = payload["annotated_pairs"] == payload["total_pairs"]
     update_status(
         run_dir,
         "annotation_complete" if complete else "awaiting_annotations",
         **payload,
+        analysis_git_revision=analysis_revision,
+        analysis_git_dirty=analysis_dirty,
         report=str(run_dir / "results" / "report.md"),
         dashboard=str(
             run_dir / "results" / "figures" / "semantic_audit_dashboard.html"

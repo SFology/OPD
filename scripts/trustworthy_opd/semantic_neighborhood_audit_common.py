@@ -62,7 +62,15 @@ def consensus_annotations(
                 "decided_annotation_count": len(decided),
             }
         )
-    return pd.DataFrame(result)
+    return pd.DataFrame(
+        result,
+        columns=[
+            "audit_id",
+            "consensus_label",
+            "annotation_count",
+            "decided_annotation_count",
+        ],
+    )
 
 
 def cohens_kappa(first: list[str], second: list[str]) -> float:

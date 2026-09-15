@@ -144,6 +144,11 @@
     达到 1,200 对；随机 20% 双人复标并报告一致率与 Cohen's kappa。随后只用语义可比较邻居重算 risk，
     并与同 prompt/q 的远邻和打乱邻居作负控制。若 oracle-filtered 指标仍约为随机水平，则优先否定当前
     局部稳定性构造；若只在过滤后稳定改善，才进入新 prompt 确认实验。
+  - 实现进展（2026-09-15）：盲审准备器、仅本机可访问的逐条标注服务、复标共识、prompt-cluster
+    precision 区间、selected/random/far 对照和 oracle-filtered reliability 重算均已实现并通过 CPU
+    测试。冻结 run `20260915_165020_semantic_neighborhood_audit_discovery` 已生成 640 条 selected
+    membership（每个表示/邻域/q/正确性组 10 条）、128 条 random 和 128 条 far membership，去重后
+    847 个待审 pair，其中 175 个预先指定为 20% 复标子集；当前等待盲审，尚无科学结果。
 
 - [ ] **IMP-009（P1）比较状态表示，不固定在单一 tail-embedding 方案。**
   - 候选：`token_embedding_tail_mean`、中间层 prefix mean、若干层 tail mean、最后 token hidden state，

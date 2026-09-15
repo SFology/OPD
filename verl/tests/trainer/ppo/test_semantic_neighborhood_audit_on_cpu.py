@@ -23,12 +23,8 @@ from serve_semantic_neighborhood_audit import safe_annotator  # noqa: E402
 
 
 def test_pair_identifier_and_annotator_validation() -> None:
-    assert semantic_pair_id("state", "neighbor") == semantic_pair_id(
-        "state", "neighbor"
-    )
-    assert semantic_pair_id("state", "neighbor") != semantic_pair_id(
-        "state", "other"
-    )
+    assert semantic_pair_id("state", "neighbor") == semantic_pair_id("state", "neighbor")
+    assert semantic_pair_id("state", "neighbor") != semantic_pair_id("state", "other")
     assert safe_annotator("rater_2") == "rater_2"
     try:
         safe_annotator("../../escape")
@@ -39,9 +35,7 @@ def test_pair_identifier_and_annotator_validation() -> None:
 
 
 def test_balanced_sampling_spans_distance_range() -> None:
-    frame = pd.DataFrame(
-        {"joint_distance": np.arange(30, dtype=float), "value": np.arange(30)}
-    )
+    frame = pd.DataFrame({"joint_distance": np.arange(30, dtype=float), "value": np.arange(30)})
     sampled = balanced_sample(frame, 9, seed=7)
     assert len(sampled) == 9
     bins = sampled.joint_distance // 10
@@ -49,6 +43,9 @@ def test_balanced_sampling_spans_distance_range() -> None:
 
 
 def test_consensus_and_kappa() -> None:
+    empty = consensus_annotations({})
+    assert empty.empty
+    assert "audit_id" in empty.columns
     annotations = {
         "a": {
             "x": {"label": "comparable"},
@@ -65,10 +62,13 @@ def test_consensus_and_kappa() -> None:
     assert result.loc["x", "consensus_label"] == "comparable"
     assert result.loc["y", "consensus_label"] == "disputed"
     assert result.loc["z", "consensus_label"] == "uncertain"
-    assert cohens_kappa(
-        ["comparable", "not_comparable"],
-        ["comparable", "not_comparable"],
-    ) == 1.0
+    assert (
+        cohens_kappa(
+            ["comparable", "not_comparable"],
+            ["comparable", "not_comparable"],
+        )
+        == 1.0
+    )
 
 
 def test_clustered_precision_and_summary() -> None:
@@ -88,9 +88,7 @@ def test_clustered_precision_and_summary() -> None:
                 }
             )
     frame = pd.DataFrame(rows)
-    estimate, low, high = clustered_precision_interval(
-        frame, samples=100, seed=9, confidence=0.95
-    )
+    estimate, low, high = clustered_precision_interval(frame, samples=100, seed=9, confidence=0.95)
     assert estimate == 0.75
     assert low <= estimate <= high
     config = {
@@ -102,10 +100,7 @@ def test_clustered_precision_and_summary() -> None:
         "analysis": {"bootstrap_samples": 100, "confidence_level": 0.95},
     }
     summary = precision_summary(frame, config)
-    pooled = summary[
-        (summary.fraction_name == "all_q")
-        & (summary.group == "all_primary_groups")
-    ].iloc[0]
+    pooled = summary[(summary.fraction_name == "all_q") & (summary.group == "all_primary_groups")].iloc[0]
     assert pooled.semantic_precision == 0.75
     assert pooled.decided == 24
 
@@ -113,9 +108,7 @@ def test_clustered_precision_and_summary() -> None:
 def test_selected_sampling_is_balanced_by_group_and_cell() -> None:
     anchors = []
     neighbors = []
-    for group_index, group in enumerate(
-        ("teacher_correct_student_wrong", "both_wrong")
-    ):
+    for group_index, group in enumerate(("teacher_correct_student_wrong", "both_wrong")):
         for index in range(6):
             state = f"s-{group_index}-{index}"
             anchors.append(

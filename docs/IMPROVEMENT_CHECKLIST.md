@@ -325,6 +325,12 @@
     输入指标哈希和校准 JSON，随后才以 seed 43 顺序运行 OPD、scaled-OPD、ROPD、normalized-ROPD
     四臂 5-step probe。直接启动未校准的 scaled-OPD 会被配置校验拒绝。下一验收点是 probe 的 reward
     RMS、actor gradient norm 和 effective token mass，而不是 correctness。
+    该探针已于 2026-09-15 07:11 UTC 全部完成，编排退出码 0；calibration 和四臂均为 5/5 step，
+    每个 run 均有完整的两个 model/optimizer rank shard。冻结尺度为 0.424445。OPD/scaled-OPD/ROPD/
+    normalized-ROPD 的平均 selected reward RMS 分别为 0.6172/0.2628/0.2613/0.6248，说明两个 RMS
+    对照达到预期；但平均 actor grad norm 分别为 1.9590/0.8295/0.3166/0.7545，说明 reward RMS
+    匹配不等于梯度匹配。下一步必须审计四个 step-5 checkpoint 的真实参数变化，并先解决 IMP-007 的
+    `lambda=1` 门控塌缩，不能直接启动完整训练。
   - 证据：seed 42 配对 run 的 `metrics/ropd_step_metrics.jsonl` 与 `logs/train.log`；实现和 probe 配置
     位于 `verl/verl/trainer/ppo/robust_opd.py`、`configs/experiments/opd_update_matched_seed43_*.yaml`。
 
@@ -436,6 +442,18 @@
     确认 actor 17.77 亿参数和 Adam moments 全部为 FP32；一步后抽查 attention/MLP/norm 参数的变化率
     为 99.95%--100%，平均绝对变化约 `0.74e-6`--`0.99e-6`，与旧 BF16 运行的 0%--1.21% 形成直接对照。
     实现提交：`d53852f`。
+
+- [ ] **IMP-033（P1）冻结顺序多臂实验的代码版本。**
+  - 发现日期：2026-09-15。
+  - 问题：本次四臂探针运行期间仅提交了 `docs/IMPROVEMENT_CHECKLIST.md`，因此 calibration、OPD、
+    scaled-OPD 的 manifest 指向 `3c2300c`，ROPD、normalized-ROPD 指向 `2a1bb46`。两个 commit 的唯一
+    差异是文档，训练代码和配置没有变化，所以不影响本次方法比较；但 manifest commit 不统一会降低
+    自动审计清晰度，未来若运行代码发生变化则可能破坏严格配对。
+  - 改进：顺序多臂启动器在开始时冻结 HEAD 和工作树状态，并在每个实验臂启动前复核；出现任何 tracked
+    代码/config 变化时停止，或改为从固定 commit 的独立 worktree 启动。运行中的纯结果/日志写入不应触发。
+  - 验收：合成测试验证未变化时所有 arm 使用同一 revision，文档或代码发生提交/修改时在下一 arm 前
+    明确停止；run manifest 记录冻结 revision 和校验结果。
+  - 证据：本次 `runs.tsv` 与 `git diff 3c2300c..2a1bb46`；实现待补充。
 
 ## 新增条目模板
 

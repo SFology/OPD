@@ -112,6 +112,14 @@
     预注册 `lambda=[0,0.003,0.01,0.03,0.1,0.3,1]` 计算全量反事实 trust、零信任率、selected RMS、
     绝对 reward mass 保留率及无邻居回退占比；这些统计不改变 actor update，也不读取 correctness 标签。
     启动器会先完成四臂 checkpoint 参数更新审计，再运行该 5-step 诊断并自动汇总结果。
+  - 诊断结果（2026-09-15）：seed-44 FP32 OPD 轨迹已完成 5/5 step，编排退出码 0。仅统计有邻居状态时，
+    `lambda=0/0.003/0.01/0.03/0.1/0.3/1` 的平均 trust 分别为
+    `95.50%/57.19%/46.68%/34.12%/18.69%/7.08%/1.02%`，零 trust 比例分别为
+    `4.50%/35.42%/43.16%/53.36%/68.93%/84.71%/96.95%`；绝对 reward mass 保留率分别为
+    `100.00%/95.92%/89.91%/78.60%/57.50%/33.80%/15.59%`。这再次排除默认 `lambda=1`，并把
+    `0.003--0.03` 确定为后续 correctness 校准应优先考察的量级，但本诊断未读取正确性标签，不能据此
+    选择最终 lambda 或声称门控能识别教师可靠性。无邻居回退在 `lambda=1` 的 selected absolute reward
+    中占 79.66%，因此后续必须将回退策略作为显式消融。
 
 - [ ] **IMP-008（P0）审计稠密离散邻域的语义有效性。**
   - 问题：同 prompt、相近进度和双球约束并不自动保证两个推理状态语义等价；错误邻居会把正常决策变化
@@ -147,6 +155,21 @@
   - 控制：q20/q40/q60/q80 分开，固定共同 continuation token horizon，教师和学生 scorer 分开。
   - 验收：prompt-cluster bootstrap 95% CI、效应量、AUROC/AUPRC、校准曲线和每组样本数齐全；不得仅以
     policy-origin 分离证明教师可靠性。
+  - 下一实验安排（2026-09-15）：先在现有统一解码冻结数据上做 discovery calibration。此前与旧邻域
+    特征相交的保守预估是 610 个状态、56 个 prompt；新管道不依赖旧标签筛选，实际完整计数见下一项。
+    按 prompt 分组做交叉验证并用 prompt-cluster bootstrap 报告不确定性；不得随机拆分相关状态。主实现
+    需重建与在线训练一致的稠密离散 support（同 prompt、
+    跨 rollout、进度窗、双空间约束、anchor action 精确 log-prob），比较当前
+    `token_embedding_tail_mean` 与预注册 contextual 表示，评估 raw risk、`risk/|r_OPD|` 和
+    `lambda=0.003/0.01/0.03` 的 trust。表示和 lambda 选定后，再在不重叠的新 prompt 块上作一次冻结的
+    confirmatory test；当前批次不作为最终确认集。
+  - 实现进展（2026-09-15）：新增可恢复的离线校准管道、自动空闲 GPU 分片、prompt-fold、精确
+    anchor-action 请求去重、prompt-cluster bootstrap、AUROC/AUPRC/校准曲线、表示/支撑密度消融及 HTML
+    邻居文本审计。`--prepare-only` 已验证冻结清单并生成 run
+    `20260915_110808_lcb_reliability_discovery`：512 条轨迹、1,331 个统一解码有效 anchor、25,815 个唯一
+    状态点和 121,090 条候选边。四个 q 的主对比 `(T+,S-):(T-,S-)` 分别为
+    `143:94/102:95/64:80/44:55`。这仍是发现集，模型特征/精确评分和最终统计尚待长任务运行，因此本条
+    不勾选。
 
 - [ ] **IMP-013（P1）去除模型 self-preference 后再评估可靠性信号。**
   - 问题：教师偏好教师分支、学生偏好学生分支；raw PPL/likelihood 很大程度反映文本来自哪个策略，而
@@ -336,7 +359,15 @@
     匹配不等于梯度匹配。下一步必须审计四个 step-5 checkpoint 的真实参数变化，并先解决 IMP-007 的
     `lambda=1` 门控塌缩，不能直接启动完整训练。
     已准备可恢复的四臂 checkpoint 审计器，按代表性 attention/MLP/norm 参数报告真实 delta RMS、L2
-    相对变化及相对 OPD 比率；审计属于下一诊断启动器的第一阶段，尚待实际运行，故本条不勾选。
+    相对变化及相对 OPD 比率。该审计已于 2026-09-15 完成：OPD/scaled-OPD/ROPD/normalized-ROPD 的
+    代表性参数 `delta RMS` 相对 OPD 分别为 `1.000/0.998/0.959/0.970`，尽管对应平均 gradient norm
+    相对值仅为 `1.000/0.423/0.162/0.385`。这表明 Adam 在短程内几乎抵消了统一 reward 缩放，reward
+    RMS 或 gradient norm 匹配都不足以构成“实际更新匹配”；下一对照应直接匹配 optimizer 后的参数
+    delta（优先通过学习率校准），故本条仍不勾选。
+  - 新增控制（2026-09-15）：除学习率校准的 OPD 对照外，加入 `shuffled-gate`。它在同一 batch/prompt
+    分层内打乱 trust 与状态的对应关系，保持 trust 直方图、零门控率和有效 reward mass 尽量一致，但
+    破坏“可靠状态得到更高权重”的语义。如果真实 gate 优于 shuffled-gate，且两者 checkpoint 参数
+    delta 可比，才构成选择性可靠性信号优于单纯稀疏/缩放效应的证据。
   - 证据：seed 42 配对 run 的 `metrics/ropd_step_metrics.jsonl` 与 `logs/train.log`；实现和 probe 配置
     位于 `verl/verl/trainer/ppo/robust_opd.py`、`configs/experiments/opd_update_matched_seed43_*.yaml`。
 

@@ -13,6 +13,8 @@
 - `launch_ppl_recovery_curve_tmux.sh`：教师介入前后 PPL 曲线；
 - `launch_ppl_branch_comparison_tmux.sh`：师生分支和 scorer 的完整比较；
 - `launch_teacher_degradation_tmux.sh`：教师退化诊断。
+- `launch_lcb_reliability_calibration_tmux.sh`：在统一解码四组标签上，以在线一致的稠密离散支撑和
+  anchor-action 精确评分校准 LCB risk/trust；同时比较 `online4`/`dense8` 与多种状态表示。
 
 ## 分层职责
 

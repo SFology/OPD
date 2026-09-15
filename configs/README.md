@@ -17,6 +17,9 @@ checkpoint 兼容。旧的 hard-min ROPD 配置已经移除，不能与当前 LC
 locality ablation。它们不通过 managed training launcher 运行，入口见
 `scripts/trustworthy_opd/README.md`。
 
+`lcb_reliability_calibration.yaml` 是当前 LCB 发现性校准配置：复用冻结学生轨迹和统一解码 verifier
+标签，不生成新的学生 continuation；输出独立写入大容量挂载点。
+
 ## 修改原则
 
 - 已经落盘的 run 使用其目录内的 resolved `config.yaml`，不要回改；

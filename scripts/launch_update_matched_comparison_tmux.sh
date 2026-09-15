@@ -16,6 +16,9 @@ MAX_UTIL=10
 STABLE_SAMPLES=3
 POLL_SECONDS=30
 PROBE_STEPS=5
+CALIBRATION_STEPS=5
+MAX_STARTUP_RETRIES=6
+RETRY_DELAY_SECONDS=60
 SESSION=opd-update-matched-seed43
 WORKER=false
 ORCH_LOG=
@@ -24,7 +27,8 @@ usage() {
     echo "Usage: $0 [--mode probe|full] [--session NAME]"
     echo "          [--gpu-count auto|N] [--min-gpus N] [--max-gpus N]"
     echo "          [--min-free-mib N] [--max-util N] [--probe-steps N]"
-    echo "          [--stable-samples N] [--poll-seconds N]"
+    echo "          [--calibration-steps N] [--stable-samples N] [--poll-seconds N]"
+    echo "          [--max-startup-retries N] [--retry-delay-seconds N]"
 }
 
 while (($#)); do
@@ -37,8 +41,11 @@ while (($#)); do
         --min-free-mib) MIN_FREE_MIB=$2; shift 2 ;;
         --max-util) MAX_UTIL=$2; shift 2 ;;
         --probe-steps) PROBE_STEPS=$2; shift 2 ;;
+        --calibration-steps) CALIBRATION_STEPS=$2; shift 2 ;;
         --stable-samples) STABLE_SAMPLES=$2; shift 2 ;;
         --poll-seconds) POLL_SECONDS=$2; shift 2 ;;
+        --max-startup-retries) MAX_STARTUP_RETRIES=$2; shift 2 ;;
+        --retry-delay-seconds) RETRY_DELAY_SECONDS=$2; shift 2 ;;
         --worker) WORKER=true; shift ;;
         --orchestration-log) ORCH_LOG=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -51,14 +58,16 @@ case "$MODE" in
     *) echo "Invalid --mode: $MODE" >&2; exit 2 ;;
 esac
 for value in "$MIN_GPUS" "$MAX_GPUS" "$MIN_FREE_MIB" "$MAX_UTIL" \
-    "$STABLE_SAMPLES" "$POLL_SECONDS" "$PROBE_STEPS"; do
+    "$STABLE_SAMPLES" "$POLL_SECONDS" "$PROBE_STEPS" "$CALIBRATION_STEPS" \
+    "$MAX_STARTUP_RETRIES" "$RETRY_DELAY_SECONDS"; do
     [[ "$value" =~ ^[0-9]+$ ]] || { echo "Numeric options must be integers" >&2; exit 2; }
 done
 [[ "$GPU_COUNT" == auto || "$GPU_COUNT" =~ ^[1-9][0-9]*$ ]] || {
     echo "--gpu-count must be auto or a positive integer" >&2
     exit 2
 }
-((MIN_GPUS >= 1 && MAX_GPUS >= MIN_GPUS && STABLE_SAMPLES >= 1 && POLL_SECONDS >= 1 && PROBE_STEPS >= 1)) || {
+((MIN_GPUS >= 1 && MAX_GPUS >= MIN_GPUS && STABLE_SAMPLES >= 1 && POLL_SECONDS >= 1 \
+    && PROBE_STEPS >= 1 && CALIBRATION_STEPS >= 3 && RETRY_DELAY_SECONDS >= 1)) || {
     echo "Invalid GPU/probe bounds" >&2
     exit 2
 }
@@ -82,6 +91,9 @@ if [[ "$WORKER" != true ]]; then
         --min-free-mib "$MIN_FREE_MIB" --max-util "$MAX_UTIL"
         --stable-samples "$STABLE_SAMPLES" --poll-seconds "$POLL_SECONDS"
         --probe-steps "$PROBE_STEPS"
+        --calibration-steps "$CALIBRATION_STEPS"
+        --max-startup-retries "$MAX_STARTUP_RETRIES"
+        --retry-delay-seconds "$RETRY_DELAY_SECONDS"
     )
     printf -v worker_command '%q ' "${worker[@]}"
     "$TMUX_BIN" new-session -d -s "$SESSION" "bash -lc '$worker_command; rc=\$?; echo update_matched_exit=\$rc; exec bash'"
@@ -95,6 +107,10 @@ fi
 [[ -n "$ORCH_LOG" ]] || { echo "--orchestration-log is required in worker mode" >&2; exit 2; }
 mkdir -p "$(dirname "$ORCH_LOG")"
 exec > >(tee -a "$ORCH_LOG") 2>&1
+ORCH_DIR=${ORCH_LOG%.log}_artifacts
+mkdir -p "$ORCH_DIR"
+RUN_MANIFEST=$ORCH_DIR/runs.tsv
+printf 'role\trun_dir\n' > "$RUN_MANIFEST"
 
 set +u
 source "$CONDA_SH"
@@ -164,35 +180,89 @@ select_stable_gpus() {
 }
 
 run_arm() {
-    local config=$1 label=$2
-    local extra=()
-    select_stable_gpus
+    local config=$1 label=$2 role=$3
+    shift 3
+    local extra=("$@")
+    local probe_overrides=()
+    local attempt=0 exit_code=0 attempt_log= run_dir=
     if [[ "$MODE" == probe ]]; then
-        extra=(
+        probe_overrides=(
             --set "experiment.name=${label}_probe${PROBE_STEPS}"
             --set "trainer.total_training_steps=$PROBE_STEPS"
             --set "trainer.save_freq=$PROBE_STEPS"
             --set "trainer.max_actor_ckpt_to_keep=1"
         )
     fi
-    echo "Starting $label on GPUs $SELECTED_GPUS at $(date -u --iso-8601=seconds)"
-    python -u scripts/run_opd_experiment.py "$config" \
-        --set "trainer.n_gpus_per_node=$RESOLVED_GPU_COUNT" \
-        --set "runtime.cuda_visible_devices=$SELECTED_GPUS" \
-        --set "runtime.min_free_gpu_memory_mb=$MIN_FREE_MIB" \
-        "${extra[@]}"
-    echo "Completed $label at $(date -u --iso-8601=seconds)"
+    while true; do
+        attempt=$((attempt + 1))
+        select_stable_gpus
+        attempt_log=$ORCH_DIR/${role}_attempt${attempt}.log
+        echo "Starting $label attempt=$attempt on GPUs $SELECTED_GPUS at $(date -u --iso-8601=seconds)"
+        set +e
+        python -u scripts/run_opd_experiment.py "$config" \
+            --set "trainer.n_gpus_per_node=$RESOLVED_GPU_COUNT" \
+            --set "runtime.cuda_visible_devices=$SELECTED_GPUS" \
+            --set "runtime.min_free_gpu_memory_mb=$MIN_FREE_MIB" \
+            "${probe_overrides[@]}" "${extra[@]}" 2>&1 | tee "$attempt_log"
+        exit_code=${PIPESTATUS[0]}
+        set -e
+        run_dir=$(sed -n 's/^RUN_DIR=//p' "$attempt_log" | head -n 1)
+        if ((exit_code == 0)); then
+            [[ -n "$run_dir" ]] || { echo "Could not recover RUN_DIR for $label" >&2; exit 1; }
+            LAST_RUN_DIR=$run_dir
+            printf '%s\t%s\n' "$role" "$run_dir" >> "$RUN_MANIFEST"
+            echo "Completed $label at $(date -u --iso-8601=seconds): $run_dir"
+            return 0
+        fi
+        if ! grep -Eq \
+            'No available memory for the cache blocks|below the configured [0-9]+ MiB safety threshold' \
+            "$attempt_log"; then
+            echo "$label failed with a non-retryable error; inspect $attempt_log" >&2
+            return "$exit_code"
+        fi
+        if [[ -n "$run_dir" && -s "$run_dir/metrics/ropd_step_metrics.jsonl" ]]; then
+            echo "$label reached training metrics; refusing an automatic from-scratch retry" >&2
+            return "$exit_code"
+        fi
+        if [[ -n "$run_dir" ]] && find "$run_dir/checkpoints" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+            echo "$label wrote checkpoints; refusing an automatic from-scratch retry" >&2
+            return "$exit_code"
+        fi
+        if ((attempt > MAX_STARTUP_RETRIES)); then
+            echo "$label exhausted $MAX_STARTUP_RETRIES startup retries; inspect $attempt_log" >&2
+            return "$exit_code"
+        fi
+        echo "Retryable pre-training GPU memory failure; reselecting after ${RETRY_DELAY_SECONDS}s."
+        sleep "$RETRY_DELAY_SECONDS"
+    done
 }
 
-configs=(
-    configs/experiments/opd_update_matched_seed43_opd.yaml
-    configs/experiments/opd_update_matched_seed43_scaled_opd.yaml
-    configs/experiments/opd_update_matched_seed43_ropd.yaml
-    configs/experiments/opd_update_matched_seed43_normalized_ropd.yaml
-)
-labels=(opd scaled_opd ropd normalized_ropd)
-for index in "${!configs[@]}"; do
-    run_arm "${configs[$index]}" "${labels[$index]}"
-done
+echo "Running independent FP32 label-free calibration before the paired arms."
+calibration_mode=$MODE
+MODE=full
+run_arm configs/experiments/opd_update_matched_scale_calibration.yaml \
+    "scale_calibration_${CALIBRATION_STEPS}" calibration \
+    --set "experiment.name=opd_update_matched_scale_calibration_${CALIBRATION_STEPS}" \
+    --set "trainer.total_training_steps=$CALIBRATION_STEPS" \
+    --set "trainer.save_freq=$CALIBRATION_STEPS" \
+    --set "trainer.max_actor_ckpt_to_keep=1"
+MODE=$calibration_mode
+
+CALIBRATION_JSON=$ORCH_DIR/fixed_opd_scale.json
+python -u scripts/calibrate_update_matched_scale.py \
+    --metrics "$LAST_RUN_DIR/metrics/ropd_step_metrics.jsonl" \
+    --minimum-steps "$CALIBRATION_STEPS" \
+    --output "$CALIBRATION_JSON" | tee "$ORCH_DIR/calibration.log"
+FIXED_OPD_SCALE=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["fixed_opd_scale"])' "$CALIBRATION_JSON")
+echo "Frozen FP32 fixed_opd_scale=$FIXED_OPD_SCALE"
+
+run_arm configs/experiments/opd_update_matched_seed43_opd.yaml opd opd
+run_arm configs/experiments/opd_update_matched_seed43_scaled_opd.yaml scaled_opd scaled_opd \
+    --set "distillation.robust_opd.fixed_opd_scale=$FIXED_OPD_SCALE"
+run_arm configs/experiments/opd_update_matched_seed43_ropd.yaml ropd ropd
+run_arm configs/experiments/opd_update_matched_seed43_normalized_ropd.yaml \
+    normalized_ropd normalized_ropd
 
 echo "All four update-matched arms completed at $(date -u --iso-8601=seconds)"
+echo "Run manifest: $RUN_MANIFEST"
+echo "Frozen calibration: $CALIBRATION_JSON"

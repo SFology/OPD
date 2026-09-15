@@ -12,7 +12,10 @@ distillation:
     # neighborhood diagnostics so their measurement overhead is matched.
     training_reward_mode: opd
     apply_to_training: false
-    fixed_opd_scale: 0.18
+    # Deliberately unset: the comparison launcher must freeze this from its
+    # independent FP32, label-free calibration run. The old BF16 value (0.18)
+    # is scientifically invalid because its actor updates quantized to zero.
+    fixed_opd_scale: null
     normalization_epsilon: 1.0e-8
     max_normalization_scale: 20.0
 

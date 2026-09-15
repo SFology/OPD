@@ -23,6 +23,7 @@ from verl.trainer.ppo.robust_opd import (
     _evenly_spaced_indices,
     _quantiles,
     build_prefix_state_features,
+    calibrate_fixed_opd_scale,
     compute_dense_discrete_lcb,
     compute_dense_discrete_ropd,
     load_projected_embedding_table,
@@ -404,3 +405,42 @@ def test_training_reward_mode_preserves_legacy_apply_flag_and_rejects_conflict()
         resolve_training_reward_mode(
             {"training_reward_mode": "normalized_ropd", "apply_to_training": False}
         )
+
+
+def test_label_free_scale_calibration_uses_median_unique_step_ratio() -> None:
+    def record(step: int, opd_rms: float, ropd_rms: float) -> dict:
+        return {
+            "step": step,
+            "training_reward_mode": "opd",
+            "ropd/training_opd_token_rms": opd_rms,
+            "ropd/training_ropd_token_rms": ropd_rms,
+        }
+
+    records = [
+        record(1, 2.0, 0.4),
+        record(2, 2.0, 0.6),
+        record(3, 2.0, 0.8),
+        # A resumed step keeps the last durable record instead of double counting.
+        record(2, 2.0, 1.0),
+    ]
+    result = calibrate_fixed_opd_scale(records, minimum_steps=3)
+
+    assert result["steps"] == [1, 2, 3]
+    assert result["per_step_ratios"] == pytest.approx([0.2, 0.5, 0.4])
+    assert result["fixed_opd_scale"] == pytest.approx(0.4)
+    assert result["label_free"] is True
+
+
+def test_scale_calibration_rejects_non_opd_or_expansive_records() -> None:
+    base = {
+        "step": 1,
+        "training_reward_mode": "ropd",
+        "ropd/training_opd_token_rms": 1.0,
+        "ropd/training_ropd_token_rms": 0.5,
+    }
+    with pytest.raises(ValueError, match="not an OPD control"):
+        calibrate_fixed_opd_scale([base], minimum_steps=1)
+
+    expansive = {**base, "training_reward_mode": "opd", "ropd/training_ropd_token_rms": 20.1}
+    with pytest.raises(ValueError, match="exceeds maximum"):
+        calibrate_fixed_opd_scale([expansive], minimum_steps=1)

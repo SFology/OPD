@@ -449,6 +449,13 @@ def validate(config: dict[str, Any]) -> None:
             raise ValueError("dense discrete ROPD requires distillation.top_k_strategy=only_stu")
         if config["rollout"]["n"] < 2:
             raise ValueError("dense discrete ROPD requires rollout.n >= 2")
+        training_mode = robust_opd.get("training_reward_mode")
+        if training_mode == "scaled_opd":
+            fixed_scale = robust_opd.get("fixed_opd_scale")
+            if fixed_scale is None or float(fixed_scale) <= 0:
+                raise ValueError(
+                    "scaled_opd requires a positive fixed_opd_scale frozen by the FP32 calibration"
+                )
 
 
 def write_yaml(path: Path, value: Any) -> None:

@@ -309,6 +309,11 @@
     测试；所有配置 dry-run 通过。2026-09-11 发现原先 `fixed_opd_scale=0.18` 来自 BF16 近乎无效训练，
     不能直接冻结为正式 FP32 对照的校准值；必须先用不读取最终测试标签的 FP32 短程 calibration 重新估计，
     再完成 5 步四臂 probe 并验证梯度/RMS。此前不要启动完整四臂训练，故不勾选。
+    2026-09-15 已完成下一阶段代码准备：旧 `0.18` 被从配置中移除；启动器会先以独立 seed 1043
+    运行 FP32 OPD calibration，只从每步 `ROPD token RMS / OPD token RMS` 的中位数冻结全局尺度，并保存
+    输入指标哈希和校准 JSON，随后才以 seed 43 顺序运行 OPD、scaled-OPD、ROPD、normalized-ROPD
+    四臂 5-step probe。直接启动未校准的 scaled-OPD 会被配置校验拒绝。下一验收点是 probe 的 reward
+    RMS、actor gradient norm 和 effective token mass，而不是 correctness。
   - 证据：seed 42 配对 run 的 `metrics/ropd_step_metrics.jsonl` 与 `logs/train.log`；实现和 probe 配置
     位于 `verl/verl/trainer/ppo/robust_opd.py`、`configs/experiments/opd_update_matched_seed43_*.yaml`。
 

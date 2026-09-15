@@ -26,6 +26,7 @@ import hashlib
 import json
 import math
 import os
+import statistics
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -115,8 +116,12 @@ def validate_dense_discrete_config(config: dict[str, Any]) -> None:
         if int(config.get("max_sparse_requests_per_trajectory", 65536)) < 1:
             raise ValueError("robust_opd.max_sparse_requests_per_trajectory must be positive")
         training_mode = resolve_training_reward_mode(config)
-        if training_mode == "scaled_opd" and float(config.get("fixed_opd_scale", 1.0)) <= 0:
-            raise ValueError("robust_opd.fixed_opd_scale must be positive")
+        if training_mode == "scaled_opd":
+            fixed_scale = config.get("fixed_opd_scale")
+            if fixed_scale is None or float(fixed_scale) <= 0:
+                raise ValueError(
+                    "robust_opd.fixed_opd_scale must be a positive frozen calibration value"
+                )
         if float(config.get("normalization_epsilon", 1e-8)) <= 0:
             raise ValueError("robust_opd.normalization_epsilon must be positive")
         if float(config.get("max_normalization_scale", 20.0)) < 1.0:
@@ -206,6 +211,74 @@ def select_training_rewards(
         "ropd/training_selected_token_rms": selected_rms,
         "ropd/training_normalization_degenerate": degenerate,
         "ropd/training_normalization_clipped": clipped,
+    }
+
+
+def calibrate_fixed_opd_scale(
+    records: list[dict[str, Any]],
+    *,
+    minimum_steps: int = 3,
+    maximum_scale: float = 20.0,
+) -> dict[str, Any]:
+    """Estimate a label-free scaled-OPD control from FP32 reward diagnostics.
+
+    The estimator is the median across training steps of
+    ``ROPD token RMS / OPD token RMS``.  Each step receives equal weight so an
+    unusually long rollout batch cannot dominate the frozen control.  Duplicate
+    records from a resumed step are resolved by keeping the last durable record.
+    """
+
+    if minimum_steps < 1:
+        raise ValueError("minimum_steps must be positive")
+    if not math.isfinite(maximum_scale) or maximum_scale <= 0:
+        raise ValueError("maximum_scale must be finite and positive")
+
+    by_step: dict[int, dict[str, Any]] = {}
+    for record in records:
+        if "step" not in record:
+            raise ValueError("calibration record is missing step")
+        by_step[int(record["step"])] = record
+    if len(by_step) < minimum_steps:
+        raise ValueError(
+            f"calibration requires at least {minimum_steps} unique steps; found {len(by_step)}"
+        )
+
+    ratios: list[float] = []
+    steps: list[int] = []
+    for step, record in sorted(by_step.items()):
+        mode = record.get("training_reward_mode")
+        if mode != "opd":
+            raise ValueError(f"calibration step {step} is not an OPD control record: {mode!r}")
+        opd_rms = float(record["ropd/training_opd_token_rms"])
+        ropd_rms = float(record["ropd/training_ropd_token_rms"])
+        if not math.isfinite(opd_rms) or opd_rms <= 0:
+            raise ValueError(f"calibration step {step} has invalid OPD RMS: {opd_rms}")
+        if not math.isfinite(ropd_rms) or ropd_rms < 0:
+            raise ValueError(f"calibration step {step} has invalid ROPD RMS: {ropd_rms}")
+        ratio = ropd_rms / opd_rms
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise ValueError(f"calibration step {step} has invalid RMS ratio: {ratio}")
+        # Individual top-k reward components shrink under the LCB gate, but
+        # their signed sum can have less cancellation and therefore a ratio
+        # above one. Only reject clearly pathological expansion.
+        if ratio > maximum_scale + 1e-8:
+            raise ValueError(
+                f"calibration step {step} ratio {ratio:.8g} exceeds maximum {maximum_scale:.8g}"
+            )
+        steps.append(step)
+        ratios.append(ratio)
+
+    fixed_scale = float(statistics.median(ratios))
+    return {
+        "estimator": "median_per_step_ropd_to_opd_token_rms_ratio",
+        "label_free": True,
+        "unique_step_count": len(steps),
+        "steps": steps,
+        "per_step_ratios": ratios,
+        "fixed_opd_scale": fixed_scale,
+        "ratio_mean": float(statistics.fmean(ratios)),
+        "ratio_min": min(ratios),
+        "ratio_max": max(ratios),
     }
 
 

@@ -1,0 +1,12 @@
+extends: opd_update_matched_seed43_opd.yaml
+
+experiment:
+  name: opd_update_matched_scale_calibration
+  description: Independent FP32 OPD trajectory used only for label-free reward-RMS calibration.
+  tags: [opd, ropd, update-matched, fp32, calibration, label-free]
+  seed: 1043
+
+distillation:
+  robust_opd:
+    training_reward_mode: opd
+    apply_to_training: false

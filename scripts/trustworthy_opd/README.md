@@ -15,6 +15,9 @@
 - `launch_teacher_degradation_tmux.sh`：教师退化诊断。
 - `launch_lcb_reliability_calibration_tmux.sh`：在统一解码四组标签上，以在线一致的稠密离散支撑和
   anchor-action 精确评分校准 LCB risk/trust；同时比较 `online4`/`dense8` 与多种状态表示。
+- `launch_semantic_neighborhood_audit_tmux.sh`：启动盲法语义邻域标注服务；准备器从已冻结 LCB run
+  分层抽取 selected、同 prompt 随机和远邻对，分析器报告语义 precision、复标一致性及仅保留可比较
+  邻居后的探索性 reliability 指标。
 
 ## 分层职责
 

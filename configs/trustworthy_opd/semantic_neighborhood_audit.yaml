@@ -1,0 +1,35 @@
+schema_version: 1
+
+experiment:
+  name: semantic_neighborhood_audit_discovery
+  seed: 20260915
+  output_root: "${OPD_STORAGE_ROOT}/trustworthy_opd_semantic_audit"
+
+source:
+  run_dir: "${OPD_STORAGE_ROOT}/trustworthy_opd_lcb_calibration/20260915_110808_lcb_reliability_discovery"
+  required_status: completed
+
+sampling:
+  groups: [teacher_correct_student_wrong, both_wrong]
+  q_points: [q20, q40, q60, q80]
+  selected_pairs_per_group_cell: 10
+  controls_per_group_cell: 2
+  control_arms: [random, far]
+  context_tail_tokens: 512
+  secondary_fraction: 0.20
+  maximum_unique_pairs: 1200
+
+annotation:
+  labels: [comparable, not_comparable, uncertain]
+  definition: >-
+    Comparable means that anchor and neighbor are pursuing the same immediate
+    reasoning subgoal and the sampled anchor action has a meaningful semantic
+    interpretation at the neighbor state.
+
+analysis:
+  bootstrap_samples: 2000
+  confidence_level: 0.95
+  minimum_decided_per_cell: 20
+  target_precision_ci_half_width: 0.10
+  minimum_oracle_states_per_class_q: 5
+

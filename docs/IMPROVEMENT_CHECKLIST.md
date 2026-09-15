@@ -120,6 +120,15 @@
     `0.003--0.03` 确定为后续 correctness 校准应优先考察的量级，但本诊断未读取正确性标签，不能据此
     选择最终 lambda 或声称门控能识别教师可靠性。无邻居回退在 `lambda=1` 的 selected absolute reward
     中占 79.66%，因此后续必须将回退策略作为显式消融。
+  - 正确性校准结果（2026-09-15）：离线 discovery run
+    `20260915_110808_lcb_reliability_discovery` 已完整结束。预注册主设置
+    `online4 + token_embedding_tail_mean` 覆盖主对比状态的 93.24%；最佳描述性 trust 指标仍为
+    `lambda=1`，但 equal-q macro AUROC 仅 0.486（prompt-cluster bootstrap 95% CI
+    `[0.473, 0.499]`），其余预注册 trust/risk/敏感性指标也未形成可靠区分。因此当前数据不能用于选择
+    lambda，更不能据此启动正式 ROPD。探索性表示消融中 `online4 + final_last` 的负绝对 LCB risk 达到
+    macro AUROC 0.585（95% CI `[0.515, 0.655]`），但 q20/q40/q60/q80 分别为
+    `0.517/0.586/0.484/0.754`，5 个 prompt fold 为 `0.586/0.452/0.784/0.598/0.635`；该结果存在明显
+    阶段异质性且来自多重探索，只能作为后续独立验证假设。
 
 - [ ] **IMP-008（P0）审计稠密离散邻域的语义有效性。**
   - 问题：同 prompt、相近进度和双球约束并不自动保证两个推理状态语义等价；错误邻居会把正常决策变化
@@ -128,6 +137,13 @@
     双空间距离、动作变化和 verifier 分组，并进行人工盲审或可复现的语义一致性标注。
   - 验收：给出邻域 precision/接受率及抽样置信区间；任何正式 ROPD 结论都同时报告
     `zero_neighbor_fraction` 和 action coverage。
+  - 下一实验（2026-09-15）：冻结 discovery run `20260915_110808_lcb_reliability_discovery`，从
+    4 种表示 × 2 种邻域密度 × 4 个 q-point 中分层抽取 anchor/neighbor；正确性组、metric 数值和距离
+    对标注者隐藏。标注“同一即时子目标且 anchor action 在 neighbor 状态下具有可比较语义 / 不可比较 /
+    不确定”，每个 cell 至少 20 对，继续抽样直至主要表示的 precision 95% CI 半宽不超过 0.10 或总量
+    达到 1,200 对；随机 20% 双人复标并报告一致率与 Cohen's kappa。随后只用语义可比较邻居重算 risk，
+    并与同 prompt/q 的远邻和打乱邻居作负控制。若 oracle-filtered 指标仍约为随机水平，则优先否定当前
+    局部稳定性构造；若只在过滤后稳定改善，才进入新 prompt 确认实验。
 
 - [ ] **IMP-009（P1）比较状态表示，不固定在单一 tail-embedding 方案。**
   - 候选：`token_embedding_tail_mean`、中间层 prefix mean、若干层 tail mean、最后 token hidden state，
@@ -168,14 +184,32 @@
     邻居文本审计。`--prepare-only` 已验证冻结清单并生成 run
     `20260915_110808_lcb_reliability_discovery`：512 条轨迹、1,331 个统一解码有效 anchor、25,815 个唯一
     状态点和 121,090 条候选边。四个 q 的主对比 `(T+,S-):(T-,S-)` 分别为
-    `143:94/102:95/64:80/44:55`。这仍是发现集，模型特征/精确评分和最终统计尚待长任务运行，因此本条
-    不勾选。
+    `143:94/102:95/64:80/44:55`。
+  - 发现集结果（2026-09-15）：长任务退出码 0，共计算 1,331 个状态、26,429 条邻居边和 19,192 个
+    去重精确 action-score 请求，得到 10,648 行指标（9,304 行有邻居支持）。预注册主表示未达到随机水平
+    以上的可靠区分，因而本条仍不勾选；下一步应先完成人工/可复现的邻居语义审计，再把探索性
+    `final_last` 假设冻结到不重叠 prompt 块上确认，而不是继续在本发现集上挑表示或 lambda。
 
 - [ ] **IMP-013（P1）去除模型 self-preference 后再评估可靠性信号。**
   - 问题：教师偏好教师分支、学生偏好学生分支；raw PPL/likelihood 很大程度反映文本来自哪个策略，而
     不是内容是否正确。
   - 改进：构造去除 scorer/branch origin 主效应的 calibrated residual，并与 raw PPL、局部稳定性对比。
   - 验收：校准只使用训练/开发划分；在 held-out prompt 上仍能区分成功与失败纠偏，并报告不确定性。
+
+- [ ] **IMP-034（P1）用重复教师续写估计状态级纠偏能力，降低单次标签噪声。**
+  - 发现日期：2026-09-15。
+  - 问题：当前 `(T+,S-)`/`(T-,S-)` 来自每个状态的一次教师采样；它是教师纠偏成功概率的一次
+    Bernoulli 观测，而不等于教师在该状态的稳定能力。单次采样噪声可能把真实的 metric--competence
+    关联衰减到接近零。
+  - 改进：IMP-008 完成后，先对现有全部 677 个 `S-` 有效 anchor 使用统一解码获得每状态 8 次独立教师
+    continuation；若原 fresh continuation 的解码和 seed 清单完全可复核，则将其作为第 1 次，仅新增
+    7 次。不得重新生成学生 continuation。q20/q40/q60/q80 分开，以 rollout-level 二项模型或
+    beta-binomial 模型估计 metric 与 `P(teacher correct | state)` 的关系，并按 prompt cluster bootstrap；
+    不以事后挑选的高/低阈值作为主要终点。只有主对比出现预注册方向且跨 q 可解释时，才扩展到 `S+`
+    控制和不重叠 prompt confirmatory block。
+  - 验收：报告每状态有效重复数、解析/触顶过滤、q-specific 效应和 95% CI、metric 分箱校准曲线、
+    prompt 外推性能；把单次标签和重复估计结果并列，证明结论是否受标签噪声主导。
+  - 证据：待补充。
 
 - [ ] **IMP-014（P1）补充 `(T-,S+)` 有害介入样本。**
   - 当前限制：统一解码后的有效样本只有约 20 个，无法支持按四个 q-point 的稳定推断。

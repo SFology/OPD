@@ -353,7 +353,7 @@
     （95% CI `[-0.23%,19.24%]`）。OPD 并未复现论文所报超过 80% gap recovery，满足 IMP-030 的
     条件性数值/训练配置复核触发条件。
 
-- [ ] **IMP-030（P1）仅在长预算评测仍异常时复核 fp32/8-GPU 论文训练数值设置。**
+- [x] **IMP-030（P1）仅在长预算评测仍异常时复核 fp32/8-GPU 论文训练数值设置。**
   - 发现日期：2026-09-10。
   - 问题：当前完成的控制臂采用 bf16、2×RTX 6000 Ada 和 CPU offload；论文默认训练配置是 fp32、
     8×A800。目标函数、batch、rollout、top-k、学习率和 epoch 已一致，但数值精度与硬件路径尚非完全
@@ -377,10 +377,17 @@
     279/279 步，退出码 0，总耗时 117881.4 秒（约 32.74 小时），无 OOM、NaN 或 NCCL 错误；最终
     `global_step_279` 的 model/optimizer 两个 rank shard、extra state、tokenizer/config 和 `data.pt`
     均完整。下一验收步骤是对该 FP32 checkpoint 运行固定 31,744-token 独立评测并与初始学生及旧
-    BF16 checkpoint 配对比较；在此之前不可仅凭训练日志宣称复现论文提升，故本条仍不勾选。
+    BF16 checkpoint 配对比较；在评测完成前不可仅凭训练日志宣称复现论文提升，因此当时未勾选。
     2026-09-14 已新增 `opd_fp32_seed42_paper_aligned_evaluation.yaml`，主要比较预注册为
     `opd_fp32_step279-initial_student`，并保留 FP32-vs-BF16 与教师 gap recovery；真实 preflight 确认
-    143 题、每题 16 次、总计 9152 条，其中 6864 条严格复用、仅 2288 条需要新增生成。待用户启动。
+    143 题、每题 16 次、总计 9152 条，其中 6864 条严格复用、仅 2288 条需要新增生成。
+  - 完成证据：`20260914_155417_opd_fp32_seed42_paper_aligned_evaluation` 于 2026-09-14 17:48 UTC
+    以退出码 0 完成。四模型均为 48/48 shards、各 2288 条，配对 seed、prompt manifest 和生成配置
+    校验通过，无 OOM/NaN/NCCL 错误。初始学生、教师、旧 BF16 OPD、新 FP32 OPD 的平均正确率分别为
+    48.95%、66.56%、48.82%、63.11%；FP32 OPD 相对初始学生提升 14.16 pp，prompt-bootstrap 95% CI
+    `[11.10,17.40]` pp；教师 gap recovery 为 80.40%，95% CI `[71.15%,90.22%]`。FP32 相对 BF16
+    提升 14.29 pp，95% CI `[11.06,17.61]` pp。两卡 offload 路径已复现论文“超过 80%”的量级，因此
+    当前没有必要为了结论再强制执行 8×A800/no-offload；硬件精确复刻仅保留为需要时的工程对照。
 
 - [ ] **IMP-031（P1）让正式评测的运行中 shard 进度实时、原子地回写状态。**
   - 发现日期：2026-09-11。

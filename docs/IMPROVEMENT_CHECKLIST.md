@@ -301,8 +301,11 @@
     ROPD token 相对权重但把整体 RMS 恢复到 OPD 水平的 `normalized-ROPD` 消融。先短程确认 update norm
     匹配，再决定是否完整训练。
   - 验收：至少比较 OPD、scaled-OPD、ROPD 和 normalized-ROPD；报告 reward RMS、gradient norm、
-    effective token mass、训练稳定性和统一 held-out correctness。只有 ROPD 在幅度匹配后仍优于全局
-    缩放，才把收益归因于选择性可靠性门控。
+    checkpoint 的真实参数更新范数/相对变化、effective token mass、训练稳定性和统一 held-out
+    correctness。由于 Adam 的二阶矩归一化会部分抵消统一 reward 缩放，不能只凭 reward RMS 或原始
+    gradient norm 宣称“更新幅度匹配”；若 scaled-OPD 的实际参数变化仍接近原始 OPD，应改用学习率匹配
+    或其他能匹配 optimizer step 的对照。只有 ROPD 在实际更新幅度匹配后仍优于全局缩放，才把收益归因
+    于选择性可靠性门控。
   - 进展：2026-09-10 已实现 `opd`、`scaled_opd`、`ropd`、`normalized_ropd` 四种训练 reward mode；
     normalized-ROPD 按 batch 把 scalar token reward RMS 恢复到 OPD 水平，并记录缩放、RMS、clip 与
     degenerate 指标。新增 seed 43 四臂配置、自动选择 2--4 张空闲 GPU 的顺序 tmux 启动器和 CPU

@@ -130,14 +130,18 @@
     `0.517/0.586/0.484/0.754`，5 个 prompt fold 为 `0.586/0.452/0.784/0.598/0.635`；该结果存在明显
     阶段异质性且来自多重探索，只能作为后续独立验证假设。
 
-- [ ] **IMP-008（P0）审计稠密离散邻域的语义有效性。**
+- [ ] **IMP-008（P0）用客观行为终点评估稠密离散邻域的有效性。**
   - 问题：同 prompt、相近进度和双球约束并不自动保证两个推理状态语义等价；错误邻居会把正常决策变化
     当成教师不稳定。
-  - 改进：按 q-point、距离区间、正确性组抽样展示 anchor/neighbor 文本；统计跨 rollout、相对进度差、
-    双空间距离、动作变化和 verifier 分组，并进行人工盲审或可复现的语义一致性标注。
-  - 验收：给出邻域 precision/接受率及抽样置信区间；任何正式 ROPD 结论都同时报告
-    `zero_neighbor_fraction` 和 action coverage。
-  - 下一实验（2026-09-15）：冻结 discovery run `20260915_110808_lcb_reliability_discovery`，从
+  - 改进：不再把主观“语义相似”人工标签作为真值。对同一 anchor 构造数量匹配的三种支撑：双球
+    selected、同 prompt/进度窗内 random、同候选集 far；在三者上都直接计算 anchor action 的精确
+    log-prob risk。以重复教师 continuation 的 verifier 成功率作为唯一主要外部终点，检验 selected
+    risk 是否比 random/far 更能预测教师纠偏能力。
+  - 验收：三种支撑严格共享 anchor、动作、候选生成规则和邻居数；按 prompt 分组交叉验证，报告相对
+    q-only baseline 的 held-out log-loss/Brier 改善及 selected−control 配对区间；任何正式 ROPD 结论仍
+    同时报告 `zero_neighbor_fraction`、action coverage 和计算开销。selected 若不优于 random/far，
+    即使表示距离看似合理，也不把该邻域解释为有效的可靠性结构。
+  - 已取消方案（2026-09-15）：曾计划冻结 discovery run `20260915_110808_lcb_reliability_discovery`，从
     4 种表示 × 2 种邻域密度 × 4 个 q-point 中分层抽取 anchor/neighbor；正确性组、metric 数值和距离
     对标注者隐藏。标注“同一即时子目标且 anchor action 在 neighbor 状态下具有可比较语义 / 不可比较 /
     不确定”，每个 cell 至少 20 对，继续抽样直至主要表示的 precision 95% CI 半宽不超过 0.10 或总量
@@ -148,7 +152,11 @@
     precision 区间、selected/random/far 对照和 oracle-filtered reliability 重算均已实现并通过 CPU
     测试。冻结 run `20260915_165020_semantic_neighborhood_audit_discovery` 已生成 640 条 selected
     membership（每个表示/邻域/q/正确性组 10 条）、128 条 random 和 128 条 far membership，去重后
-    847 个待审 pair，其中 175 个预先指定为 20% 复标子集；当前等待盲审，尚无科学结果。
+    847 个待审 pair，其中 175 个预先指定为 20% 复标子集；该方案在开始标注前取消，未产生科学结果。
+  - 方案调整（2026-09-16）：上述人工盲审在 0/847 标注时暂停，run 状态已写为 `paused`，服务已停止，
+    冻结样本完整保留。原因不是人工成本本身，而是“两段长推理是否语义等价”缺少客观、可重复的判据，
+    即使多人复标也可能只测量标注规范而非模型能力域。后续采用上面的 verifier 行为终点和
+    selected/random/far 支撑对照，不再要求人工语义距离真值。
 
 - [ ] **IMP-009（P1）比较状态表示，不固定在单一 tail-embedding 方案。**
   - 候选：`token_embedding_tail_mean`、中间层 prefix mean、若干层 tail mean、最后 token hidden state，
@@ -157,11 +165,11 @@
     显存和时间，不以训练最终性能单独选择表示。
 
 - [ ] **IMP-010（P1）评估更稠密但仍高效的跨 batch / 跨 step support memory bank。**
-  - 前提：IMP-008 证明当前邻域定义至少有可接受的语义 precision。
+  - 前提：IMP-008 证明当前邻域相对 random/far 支撑能增加对客观教师纠偏能力的 held-out 预测价值。
   - 改进：按 prompt/问题维护带版本和过期策略的状态缓存，防止过旧策略状态混入；先离线重放，再决定
     是否接入在线训练。
-  - 验收：相对当前同 batch support 明显提高有效邻居覆盖，同时邻域 precision 不下降，额外耗时和存储
-    有清晰预算。
+  - 验收：相对当前同 batch support 明显提高有效邻居覆盖，且对 verifier 教师纠偏概率的 held-out
+    预测价值不低于当前支撑并优于数量匹配的 random/far，对额外耗时和存储有清晰预算。
 
 - [ ] **IMP-011（P2）仅在离散方法证据充分后研究连续邻域近似。**
   - 备选：soft-token/embedding 对抗扰动、奖励对状态表示的一阶线性化与梯度范数上界、共享语义编码器。
@@ -192,8 +200,9 @@
     `143:94/102:95/64:80/44:55`。
   - 发现集结果（2026-09-15）：长任务退出码 0，共计算 1,331 个状态、26,429 条邻居边和 19,192 个
     去重精确 action-score 请求，得到 10,648 行指标（9,304 行有邻居支持）。预注册主表示未达到随机水平
-    以上的可靠区分，因而本条仍不勾选；下一步应先完成人工/可复现的邻居语义审计，再把探索性
-    `final_last` 假设冻结到不重叠 prompt 块上确认，而不是继续在本发现集上挑表示或 lambda。
+    以上的可靠区分，因而本条仍不勾选；人工语义审计现已取消，下一步改用 IMP-034 的重复教师续写
+    构造客观能力终点，并以 selected/random/far 支撑作配对反证，而不是继续在本发现集上挑表示或
+    lambda。
 
 - [ ] **IMP-013（P1）去除模型 self-preference 后再评估可靠性信号。**
   - 问题：教师偏好教师分支、学生偏好学生分支；raw PPL/likelihood 很大程度反映文本来自哪个策略，而
@@ -206,14 +215,17 @@
   - 问题：当前 `(T+,S-)`/`(T-,S-)` 来自每个状态的一次教师采样；它是教师纠偏成功概率的一次
     Bernoulli 观测，而不等于教师在该状态的稳定能力。单次采样噪声可能把真实的 metric--competence
     关联衰减到接近零。
-  - 改进：IMP-008 完成后，先对现有全部 677 个 `S-` 有效 anchor 使用统一解码获得每状态 8 次独立教师
+  - 改进：对现有全部 677 个 `S-` 有效 anchor 使用统一解码获得每状态 8 次独立教师
     continuation；若原 fresh continuation 的解码和 seed 清单完全可复核，则将其作为第 1 次，仅新增
-    7 次。不得重新生成学生 continuation。q20/q40/q60/q80 分开，以 rollout-level 二项模型或
-    beta-binomial 模型估计 metric 与 `P(teacher correct | state)` 的关系，并按 prompt cluster bootstrap；
-    不以事后挑选的高/低阈值作为主要终点。只有主对比出现预注册方向且跨 q 可解释时，才扩展到 `S+`
-    控制和不重叠 prompt confirmatory block。
+    7 次，共新增 4,739 次教师生成。不得重新生成学生 continuation。q20/q40/q60/q80 分开，以
+    rollout-level 二项模型或 beta-binomial 模型估计 metric 与
+    `P(teacher correct | state)` 的关系，并按 prompt cluster bootstrap；不以事后挑选的高/低阈值作为
+    主要终点。同时按 IMP-008 为每个 anchor 构造 selected/random/far 数量匹配支撑并精确评分。
+    只有 selected 指标相对 q-only 和两种支撑控制都增加 held-out 预测价值，且跨 q 可解释时，才扩展到
+    `S+` 控制和不重叠 prompt confirmatory block。
   - 验收：报告每状态有效重复数、解析/触顶过滤、q-specific 效应和 95% CI、metric 分箱校准曲线、
-    prompt 外推性能；把单次标签和重复估计结果并列，证明结论是否受标签噪声主导。
+    prompt 外推性能，以及 selected−random、selected−far 的配对 log-loss/Brier 差值区间；把单次标签和
+    重复估计结果并列，证明结论是否受标签噪声主导。
   - 证据：待补充。
 
 - [ ] **IMP-014（P1）补充 `(T-,S+)` 有害介入样本。**

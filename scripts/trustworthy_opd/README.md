@@ -17,7 +17,10 @@
   anchor-action 精确评分校准 LCB risk/trust；同时比较 `online4`/`dense8` 与多种状态表示。
 - `launch_semantic_neighborhood_audit_tmux.sh`：启动盲法语义邻域标注服务；准备器从已冻结 LCB run
   分层抽取 selected、同 prompt 随机和远邻对，分析器报告语义 precision、复标一致性及仅保留可比较
-  邻居后的探索性 reliability 指标。
+  邻居后的探索性 reliability 指标。该主观标注方案已经暂停，不再作为后续科学结论入口。
+- `launch_objective_reliability_tmux.sh`：客观替代方案；冻结全部 677 个 `S-` 状态，复用已有学生
+  continuation，并把每状态教师有效 continuation 扩至 8 次。对 selected/random/far 数量匹配支撑
+  计算 anchor-action 精确分数，以 verifier 成功率为终点进行 prompt-grouped 交叉验证和配对比较。
 
 ## 分层职责
 

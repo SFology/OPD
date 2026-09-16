@@ -226,6 +226,12 @@
   - 验收：报告每状态有效重复数、解析/触顶过滤、q-specific 效应和 95% CI、metric 分箱校准曲线、
     prompt 外推性能，以及 selected−random、selected−far 的配对 log-loss/Brier 差值区间；把单次标签和
     重复估计结果并列，证明结论是否受标签噪声主导。
+  - 实现进展（2026-09-16）：已实现可恢复的客观可靠性流水线，冻结 677 个 `S-` anchor（q20/q40/q60/q80
+    为 `237/197/144/99`），复用原统一解码的 1 次有效教师续写且不重新生成学生续写；目标为每状态 8 次
+    有效教师续写。prepare-only 已生成 40,671 条 selected/random/far 数量严格匹配的支撑边和 26,322 个
+    anchor-action 精确评分请求，匹配检查为 0 个异常 cell。分析预先固定 prompt-grouped 5-fold、q-only
+    baseline、二项 Brier/log-loss、prompt-cluster bootstrap，以及 selected−random/far 配对区间。代码和
+    数据准备完成不等于科学验收，需待 GPU 生成与分析完成后补结果。
   - 证据：待补充。
 
 - [ ] **IMP-014（P1）补充 `(T-,S+)` 有害介入样本。**
